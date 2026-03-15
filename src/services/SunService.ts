@@ -230,9 +230,11 @@ export async function calculateSunStatus(
     confidence = "low";
   }
 
-  // Cloud cover – we'll simulate for now (would use OpenWeatherMap API)
-  const cloudCover = 0; // Will be enriched by weather service
+  // Fetch real cloud cover from OpenWeatherMap
+  const weather = await fetchWeather(venueLat, venueLng);
+  const cloudCover = weather?.cloudCover ?? 0;
 
+  // Combine: sunny only if no building shadow AND not too cloudy
   const isSunny = !buildingShadow && cloudCover < 70;
 
   return {
@@ -242,6 +244,7 @@ export async function calculateSunStatus(
     solarAltitude: solar.altitude,
     solarAzimuth: solar.azimuth,
     confidence,
+    weather,
   };
 }
 
