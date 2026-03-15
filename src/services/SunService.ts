@@ -10,7 +10,6 @@ export interface SunStatus {
   confidence: "high" | "medium" | "low";
   weather?: WeatherData | null;
 }
-}
 
 export interface Building {
   lat: number;
