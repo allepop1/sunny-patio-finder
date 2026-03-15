@@ -1,5 +1,5 @@
 import { Venue } from "@/services/SunService";
-import { Sun, Cloud, MapPin, Star, Clock } from "lucide-react";
+import { Sun, Cloud, MapPin, Star, Clock, Thermometer, Droplets, Wind } from "lucide-react";
 import { motion } from "framer-motion";
 
 interface VenueCardProps {
