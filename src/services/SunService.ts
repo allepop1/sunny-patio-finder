@@ -1,4 +1,5 @@
 import SunCalc from "suncalc";
+import { fetchWeather, type WeatherData } from "./WeatherService";
 
 export interface SunStatus {
   isSunny: boolean;
