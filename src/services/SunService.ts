@@ -8,6 +8,8 @@ export interface SunStatus {
   solarAltitude: number;
   solarAzimuth: number;
   confidence: "high" | "medium" | "low";
+  weather?: WeatherData | null;
+}
 }
 
 export interface Building {
