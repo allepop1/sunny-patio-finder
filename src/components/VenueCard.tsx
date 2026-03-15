@@ -78,13 +78,43 @@ export function VenueCard({ venue, compact = false, onClick }: VenueCardProps) {
         </div>
       )}
 
-      {/* Solar info */}
+      {/* Weather + Solar info */}
       {!compact && venue.sunStatus && (
-        <div className="mt-3 pt-3 border-t border-border">
+        <div className="mt-3 pt-3 border-t border-border space-y-2">
+          {venue.sunStatus.weather && (
+            <div className="flex items-center gap-4 text-xs text-muted-foreground">
+              <div className="flex items-center gap-1">
+                <Thermometer className="h-3.5 w-3.5" />
+                <span>{Math.round(venue.sunStatus.weather.temperature)}°C</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <Cloud className="h-3.5 w-3.5" />
+                <span>{venue.sunStatus.weather.cloudCover}% moln</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <Wind className="h-3.5 w-3.5" />
+                <span>{venue.sunStatus.weather.windSpeed} m/s</span>
+              </div>
+            </div>
+          )}
+          {/* Forecast preview */}
+          {venue.sunStatus.weather?.forecast && venue.sunStatus.weather.forecast.length > 0 && (
+            <div className="flex gap-2 overflow-x-auto py-1">
+              {venue.sunStatus.weather.forecast.slice(0, 4).map((f, i) => (
+                <div key={i} className="flex flex-col items-center text-xs text-muted-foreground min-w-[48px]">
+                  <span>{new Date(f.time).toLocaleTimeString("sv-SE", { hour: "2-digit", minute: "2-digit" })}</span>
+                  <span className={f.cloudCover < 70 ? "text-sunny-foreground font-medium" : ""}>
+                    {f.cloudCover < 30 ? "☀️" : f.cloudCover < 70 ? "⛅" : "☁️"}
+                  </span>
+                  <span>{Math.round(f.temperature)}°</span>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="flex justify-between text-xs text-muted-foreground">
             <span>Solhöjd: {venue.sunStatus.solarAltitude.toFixed(1)}°</span>
             {venue.sunStatus.buildingShadow && (
-              <span className="text-shady-foreground">Byggnadssskugga</span>
+              <span className="text-shady-foreground">Byggnadsskugga</span>
             )}
           </div>
         </div>
