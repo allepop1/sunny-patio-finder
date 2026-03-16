@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { MapView } from "@/components/MapView";
 import { SearchBar } from "@/components/SearchBar";
 import { VenueList } from "@/components/VenueList";
+import { TimeSlider } from "@/components/TimeSlider";
 import { stockholmVenues } from "@/data/stockholmVenues";
 import { calculateSunStatusForVenues, Venue } from "@/services/SunService";
 import { Sun, List, Map as MapIcon } from "lucide-react";
