@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { MapView } from "@/components/MapView";
 import { SearchBar } from "@/components/SearchBar";
 import { VenueList } from "@/components/VenueList";
+import { TimeSlider } from "@/components/TimeSlider";
 import { stockholmVenues } from "@/data/stockholmVenues";
 import { calculateSunStatusForVenues, Venue } from "@/services/SunService";
 import { Sun, List, Map as MapIcon } from "lucide-react";
@@ -16,15 +17,16 @@ const Index = () => {
   const [isLocating, setIsLocating] = useState(false);
   const [view, setView] = useState<"map" | "list">("map");
   const [selectedVenue, setSelectedVenue] = useState<Venue | null>(null);
+  const [selectedDate, setSelectedDate] = useState<Date>(new Date());
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
-  const loadSunStatus = useCallback(async () => {
+  const loadSunStatus = useCallback(async (date: Date = new Date()) => {
     setIsLoading(true);
     try {
-      const updated = await calculateSunStatusForVenues(stockholmVenues);
+      const updated = await calculateSunStatusForVenues(stockholmVenues, date);
       setVenues(updated);
     } catch (err) {
       console.error("Failed to calculate sun status:", err);
-      // Fallback: mock sun status based on solar position only
       setVenues(
         stockholmVenues.map((v, i) => ({
           ...v,
@@ -43,12 +45,19 @@ const Index = () => {
     }
   }, []);
 
-  useEffect(() => {
-    loadSunStatus();
-    // Refresh every 10 minutes
-    const interval = setInterval(loadSunStatus, 10 * 60 * 1000);
-    return () => clearInterval(interval);
+  const handleTimeChange = useCallback((date: Date) => {
+    setSelectedDate(date);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      loadSunStatus(date);
+    }, 400);
   }, [loadSunStatus]);
+
+  useEffect(() => {
+    loadSunStatus(selectedDate);
+    const interval = setInterval(() => loadSunStatus(selectedDate), 10 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [loadSunStatus, selectedDate]);
 
   const handleLocateMe = () => {
     if (!navigator.geolocation) return;
@@ -103,6 +112,9 @@ const Index = () => {
           isLocating={isLocating}
         />
       </div>
+
+      {/* Time Slider */}
+      <TimeSlider onChange={handleTimeChange} isLoading={isLoading} />
 
       {/* View Toggle (mobile) */}
       <div className="flex items-center gap-1 px-4 py-2 bg-background sm:hidden">
