@@ -145,24 +145,37 @@ function estimateBuildingRadius(building: Building): number {
 const osmCache = new Map<string, { buildings: Building[]; timestamp: number }>();
 const OSM_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+
 async function fetchWithRetry(
   url: string,
   options: RequestInit,
   maxRetries: number = 3,
-  baseDelayMs: number = 2000
+  baseDelayMs: number = 3000
 ): Promise<Response> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const response = await fetch(url, options);
-    if (response.ok) return response;
+    try {
+      const response = await fetch(url, options);
+      if (response.ok) return response;
 
-    if (response.status === 429 && attempt < maxRetries) {
-      const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
-      console.info(`Overpass rate-limited, retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${maxRetries})`);
-      await new Promise((r) => setTimeout(r, delay));
-      continue;
+      if (RETRYABLE_STATUSES.has(response.status) && attempt < maxRetries) {
+        const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 2000;
+        console.info(`Overpass ${response.status}, retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${maxRetries})`);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+
+      throw new Error(`Overpass API error: ${response.status}`);
+    } catch (error) {
+      if (attempt < maxRetries && error instanceof TypeError) {
+        // Network error — retry
+        const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 2000;
+        console.info(`Overpass network error, retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${maxRetries})`);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      throw error;
     }
-
-    throw new Error(`Overpass API error: ${response.status}`);
   }
   throw new Error("Overpass API: max retries exceeded");
 }
@@ -284,7 +297,7 @@ export async function calculateSunStatus(
 
 // ── Batch processing ──
 
-const VENUE_PROCESSING_CONCURRENCY = 3;
+const VENUE_PROCESSING_CONCURRENCY = 2;
 
 async function mapWithConcurrencyLimit<T, R>(
   items: T[],
