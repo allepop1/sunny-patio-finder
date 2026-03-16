@@ -142,11 +142,42 @@ function estimateBuildingRadius(building: Building): number {
 
 // ── OSM Overpass API – fetch nearby buildings with height data ──
 
+const osmCache = new Map<string, { buildings: Building[]; timestamp: number }>();
+const OSM_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  maxRetries: number = 3,
+  baseDelayMs: number = 2000
+): Promise<Response> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const response = await fetch(url, options);
+    if (response.ok) return response;
+
+    if (response.status === 429 && attempt < maxRetries) {
+      const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
+      console.info(`Overpass rate-limited, retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${maxRetries})`);
+      await new Promise((r) => setTimeout(r, delay));
+      continue;
+    }
+
+    throw new Error(`Overpass API error: ${response.status}`);
+  }
+  throw new Error("Overpass API: max retries exceeded");
+}
+
 export async function fetchBuildingsFromOSM(
   lat: number,
   lng: number,
   radiusMeters: number = 200
 ): Promise<Building[]> {
+  const cacheKey = `${lat.toFixed(3)},${lng.toFixed(3)},${radiusMeters}`;
+  const cached = osmCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < OSM_CACHE_TTL) {
+    return cached.buildings;
+  }
+
   const query = `
     [out:json][timeout:10];
     (
@@ -157,16 +188,17 @@ export async function fetchBuildingsFromOSM(
   `;
 
   try {
-    const response = await fetch("https://overpass-api.de/api/interpreter", {
-      method: "POST",
-      body: `data=${encodeURIComponent(query)}`,
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    });
-
-    if (!response.ok) throw new Error("Overpass API error");
+    const response = await fetchWithRetry(
+      "https://overpass-api.de/api/interpreter",
+      {
+        method: "POST",
+        body: `data=${encodeURIComponent(query)}`,
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      }
+    );
 
     const data = await response.json();
-    return data.elements
+    const buildings: Building[] = data.elements
       .filter((el: any) => el.geometry && el.geometry.length > 0)
       .map((el: any) => ({
         lat: el.geometry[0].lat,
@@ -176,6 +208,9 @@ export async function fetchBuildingsFromOSM(
         ),
         polygon: el.geometry.map((g: any) => [g.lat, g.lon] as [number, number]),
       }));
+
+    osmCache.set(cacheKey, { buildings, timestamp: Date.now() });
+    return buildings;
   } catch (error) {
     console.warn("OSM building fetch failed, using estimates:", error);
     return [];
