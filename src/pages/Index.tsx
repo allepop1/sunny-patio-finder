@@ -54,11 +54,10 @@ const Index = () => {
   }, [loadSunStatus]);
 
   useEffect(() => {
-    loadSunStatus();
-    // Refresh every 10 minutes
-    const interval = setInterval(loadSunStatus, 10 * 60 * 1000);
+    loadSunStatus(selectedDate);
+    const interval = setInterval(() => loadSunStatus(selectedDate), 10 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [loadSunStatus]);
+  }, [loadSunStatus, selectedDate]);
 
   const handleLocateMe = () => {
     if (!navigator.geolocation) return;
