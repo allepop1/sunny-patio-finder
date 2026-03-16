@@ -1,3 +1,4 @@
+import { forwardRef } from "react";
 import { Venue } from "@/services/SunService";
 import { Sun, Cloud, MapPin, Star, Clock, Thermometer, Droplets, Wind } from "lucide-react";
 import { motion } from "framer-motion";
@@ -8,7 +9,7 @@ interface VenueCardProps {
   onClick?: () => void;
 }
 
-export function VenueCard({ venue, compact = false, onClick }: VenueCardProps) {
+export const VenueCard = forwardRef<HTMLDivElement, VenueCardProps>(function VenueCard({ venue, compact = false, onClick }, ref) {
   const isSunny = venue.sunStatus?.isSunny ?? true;
   const confidence = venue.sunStatus?.confidence ?? "low";
 
@@ -121,4 +122,4 @@ export function VenueCard({ venue, compact = false, onClick }: VenueCardProps) {
       )}
     </motion.div>
   );
-}
+});
