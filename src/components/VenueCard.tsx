@@ -122,4 +122,4 @@ export const VenueCard = forwardRef<HTMLDivElement, VenueCardProps>(function Ven
       )}
     </motion.div>
   );
-}
+});
