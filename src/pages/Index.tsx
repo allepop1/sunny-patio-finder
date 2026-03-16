@@ -17,15 +17,16 @@ const Index = () => {
   const [isLocating, setIsLocating] = useState(false);
   const [view, setView] = useState<"map" | "list">("map");
   const [selectedVenue, setSelectedVenue] = useState<Venue | null>(null);
+  const [selectedDate, setSelectedDate] = useState<Date>(new Date());
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
-  const loadSunStatus = useCallback(async () => {
+  const loadSunStatus = useCallback(async (date: Date = new Date()) => {
     setIsLoading(true);
     try {
-      const updated = await calculateSunStatusForVenues(stockholmVenues);
+      const updated = await calculateSunStatusForVenues(stockholmVenues, date);
       setVenues(updated);
     } catch (err) {
       console.error("Failed to calculate sun status:", err);
-      // Fallback: mock sun status based on solar position only
       setVenues(
         stockholmVenues.map((v, i) => ({
           ...v,
@@ -43,6 +44,14 @@ const Index = () => {
       setIsLoading(false);
     }
   }, []);
+
+  const handleTimeChange = useCallback((date: Date) => {
+    setSelectedDate(date);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      loadSunStatus(date);
+    }, 400);
+  }, [loadSunStatus]);
 
   useEffect(() => {
     loadSunStatus();
