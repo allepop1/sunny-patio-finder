@@ -113,6 +113,9 @@ const Index = () => {
         />
       </div>
 
+      {/* Time Slider */}
+      <TimeSlider onChange={handleTimeChange} isLoading={isLoading} />
+
       {/* View Toggle (mobile) */}
       <div className="flex items-center gap-1 px-4 py-2 bg-background sm:hidden">
         <button
