@@ -249,15 +249,40 @@ export async function calculateSunStatus(
 
 // ── Batch processing ──
 
+const VENUE_PROCESSING_CONCURRENCY = 3;
+
+async function mapWithConcurrencyLimit<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex++;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, () => worker())
+  );
+
+  return results;
+}
+
 export async function calculateSunStatusForVenues(
   venues: Venue[],
   date: Date = new Date()
 ): Promise<Venue[]> {
-  const results = await Promise.all(
-    venues.map(async (venue) => {
+  return mapWithConcurrencyLimit(
+    venues,
+    VENUE_PROCESSING_CONCURRENCY,
+    async (venue) => {
       const sunStatus = await calculateSunStatus(venue.lat, venue.lng, date);
       return { ...venue, sunStatus };
-    })
+    }
   );
-  return results;
 }
