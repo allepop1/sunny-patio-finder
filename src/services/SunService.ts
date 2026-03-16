@@ -297,7 +297,7 @@ export async function calculateSunStatus(
 
 // ── Batch processing ──
 
-const VENUE_PROCESSING_CONCURRENCY = 3;
+const VENUE_PROCESSING_CONCURRENCY = 2;
 
 async function mapWithConcurrencyLimit<T, R>(
   items: T[],
