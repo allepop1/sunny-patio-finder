@@ -3,6 +3,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { Venue } from "@/services/SunService";
 import { VenueCard } from "./VenueCard";
+import { ShadowLayer } from "./ShadowLayer";
 import { useEffect } from "react";
 
 // Fix leaflet default icon issue
