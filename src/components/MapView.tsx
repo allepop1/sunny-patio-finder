@@ -3,6 +3,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { Venue } from "@/services/SunService";
 import { VenueCard } from "./VenueCard";
+import { ShadowLayer } from "./ShadowLayer";
 import { useEffect } from "react";
 
 // Fix leaflet default icon issue
@@ -27,6 +28,7 @@ interface MapViewProps {
   center: [number, number];
   onVenueSelect?: (venue: Venue) => void;
   selectedVenue?: Venue | null;
+  selectedDate?: Date;
 }
 
 function MapUpdater({ center }: { center: [number, number] }) {
@@ -37,7 +39,7 @@ function MapUpdater({ center }: { center: [number, number] }) {
   return null;
 }
 
-export function MapView({ venues, center, onVenueSelect, selectedVenue }: MapViewProps) {
+export function MapView({ venues, center, onVenueSelect, selectedVenue, selectedDate }: MapViewProps) {
   return (
     <MapContainer
       center={center}
@@ -51,6 +53,7 @@ export function MapView({ venues, center, onVenueSelect, selectedVenue }: MapVie
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
         url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
       />
+      <ShadowLayer date={selectedDate ?? new Date()} />
       {venues.map((venue) => (
         <Marker
           key={venue.id}
