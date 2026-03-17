@@ -39,7 +39,7 @@ function MapUpdater({ center }: { center: [number, number] }) {
   return null;
 }
 
-export function MapView({ venues, center, onVenueSelect, selectedVenue }: MapViewProps) {
+export function MapView({ venues, center, onVenueSelect, selectedVenue, selectedDate }: MapViewProps) {
   return (
     <MapContainer
       center={center}
@@ -53,6 +53,7 @@ export function MapView({ venues, center, onVenueSelect, selectedVenue }: MapVie
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
         url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
       />
+      <ShadowLayer date={selectedDate ?? new Date()} />
       {venues.map((venue) => (
         <Marker
           key={venue.id}
