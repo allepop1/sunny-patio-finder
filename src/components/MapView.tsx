@@ -28,6 +28,7 @@ interface MapViewProps {
   center: [number, number];
   onVenueSelect?: (venue: Venue) => void;
   selectedVenue?: Venue | null;
+  selectedDate?: Date;
 }
 
 function MapUpdater({ center }: { center: [number, number] }) {
