@@ -155,6 +155,7 @@ const Index = () => {
             center={center}
             onVenueSelect={setSelectedVenue}
             selectedVenue={selectedVenue}
+            selectedDate={selectedDate}
           />
         </div>
 
