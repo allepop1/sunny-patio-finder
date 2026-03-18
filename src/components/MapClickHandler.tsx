@@ -19,10 +19,31 @@ interface ClickedPoint {
   lng: number;
   sunStatus: SunStatus | null;
   loading: boolean;
+  address: string | null;
 }
 
 interface MapClickHandlerProps {
   date: Date;
+}
+
+async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&addressdetails=1&zoom=18`,
+      { headers: { "Accept-Language": "sv" } }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const a = data.address;
+    if (!a) return data.display_name || null;
+    const road = a.road || a.pedestrian || a.path || "";
+    const number = a.house_number || "";
+    const district = a.suburb || a.neighbourhood || a.city_district || "";
+    const parts = [road && number ? `${road} ${number}` : road, district].filter(Boolean);
+    return parts.join(", ") || data.display_name || null;
+  } catch {
+    return null;
+  }
 }
 
 export function MapClickHandler({ date }: MapClickHandlerProps) {
@@ -31,25 +52,24 @@ export function MapClickHandler({ date }: MapClickHandlerProps) {
   useMapEvents({
     click: async (e) => {
       const { lat, lng } = e.latlng;
-      setPoint({ lat, lng, sunStatus: null, loading: true });
+      setPoint({ lat, lng, sunStatus: null, loading: true, address: null });
 
-      try {
-        const status = await calculateSunStatus(lat, lng, date);
-        setPoint({ lat, lng, sunStatus: status, loading: false });
-      } catch {
-        setPoint({ lat, lng, sunStatus: null, loading: false });
-      }
+      const [status, address] = await Promise.all([
+        calculateSunStatus(lat, lng, date).catch(() => null),
+        reverseGeocode(lat, lng),
+      ]);
+      setPoint({ lat, lng, sunStatus: status, loading: false, address });
     },
   });
 
   // Recalculate when date changes
   useEffect(() => {
     if (!point || point.loading) return;
-    const { lat, lng } = point;
+    const { lat, lng, address } = point;
     setPoint((prev) => prev ? { ...prev, loading: true } : null);
 
     calculateSunStatus(lat, lng, date)
-      .then((status) => setPoint({ lat, lng, sunStatus: status, loading: false }))
+      .then((status) => setPoint({ lat, lng, sunStatus: status, loading: false, address }))
       .catch(() => setPoint((prev) => prev ? { ...prev, loading: false } : null));
   }, [date]);
 
@@ -92,7 +112,7 @@ export function MapClickHandler({ date }: MapClickHandlerProps) {
               <div className="flex items-center gap-1 text-xs text-muted-foreground mb-2">
                 <MapPin className="h-3 w-3" />
                 <span>
-                  {point.lat.toFixed(5)}, {point.lng.toFixed(5)}
+                  {point.address || `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`}
                 </span>
               </div>
 
