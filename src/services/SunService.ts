@@ -143,7 +143,7 @@ function estimateBuildingRadius(building: Building): number {
 // ── OSM Overpass API – fetch nearby buildings with height data ──
 
 const osmCache = new Map<string, { buildings: Building[]; timestamp: number }>();
-const OSM_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const OSM_CACHE_TTL = 30 * 60 * 1000; // 30 minutes – buildings don't change often
 
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 
