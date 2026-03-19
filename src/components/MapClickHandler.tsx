@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Marker, Popup, useMapEvents } from "react-leaflet";
 import L from "leaflet";
 import { Sun, Cloud, Loader2, MapPin } from "lucide-react";
-import { calculateSunStatus, SunStatus } from "@/services/SunService";
+import { getSolarPosition } from "@/services/SunService";
+import { fetchWeather } from "@/services/WeatherService";
 
 const clickIcon = L.divIcon({
   className: "click-marker",
@@ -14,10 +15,17 @@ const clickIcon = L.divIcon({
   popupAnchor: [0, -18],
 });
 
+interface SunResult {
+  isSunny: boolean;
+  solarAltitude: number;
+  cloudCover: number;
+  confidence: "high" | "medium" | "low";
+}
+
 interface ClickedPoint {
   lat: number;
   lng: number;
-  sunStatus: SunStatus | null;
+  sunResult: SunResult | null;
   loading: boolean;
   address: string | null;
 }
@@ -46,19 +54,43 @@ async function reverseGeocode(lat: number, lng: number): Promise<string | null> 
   }
 }
 
+/** Fast sun check: solar position + weather only (no Overpass building query) */
+async function quickSunCheck(lat: number, lng: number, date: Date): Promise<SunResult> {
+  const solar = getSolarPosition(date, lat, lng);
+
+  if (solar.altitude <= 0) {
+    return { isSunny: false, solarAltitude: solar.altitude, cloudCover: 0, confidence: "high" };
+  }
+
+  const weather = await fetchWeather(lat, lng);
+  const cloudCover = weather?.cloudCover ?? 0;
+
+  return {
+    isSunny: cloudCover < 70 && solar.altitude > 0,
+    solarAltitude: solar.altitude,
+    cloudCover,
+    confidence: "low", // no building data
+  };
+}
+
 export function MapClickHandler({ date }: MapClickHandlerProps) {
   const [point, setPoint] = useState<ClickedPoint | null>(null);
+  const clickIdRef = useRef(0);
 
   useMapEvents({
     click: async (e) => {
       const { lat, lng } = e.latlng;
-      setPoint({ lat, lng, sunStatus: null, loading: true, address: null });
+      const id = ++clickIdRef.current;
+      setPoint({ lat, lng, sunResult: null, loading: true, address: null });
 
-      const [status, address] = await Promise.all([
-        calculateSunStatus(lat, lng, date).catch(() => null),
+      // Run sun check and geocode in parallel – both are fast
+      const [result, address] = await Promise.all([
+        quickSunCheck(lat, lng, date),
         reverseGeocode(lat, lng),
       ]);
-      setPoint({ lat, lng, sunStatus: status, loading: false, address });
+
+      if (id !== clickIdRef.current) return; // stale click
+      setPoint({ lat, lng, sunResult: result, loading: false, address });
     },
   });
 
@@ -66,16 +98,18 @@ export function MapClickHandler({ date }: MapClickHandlerProps) {
   useEffect(() => {
     if (!point || point.loading) return;
     const { lat, lng, address } = point;
+    const id = ++clickIdRef.current;
     setPoint((prev) => prev ? { ...prev, loading: true } : null);
 
-    calculateSunStatus(lat, lng, date)
-      .then((status) => setPoint({ lat, lng, sunStatus: status, loading: false, address }))
-      .catch(() => setPoint((prev) => prev ? { ...prev, loading: false } : null));
+    quickSunCheck(lat, lng, date).then((result) => {
+      if (id !== clickIdRef.current) return;
+      setPoint({ lat, lng, sunResult: result, loading: false, address });
+    });
   }, [date]);
 
   if (!point) return null;
 
-  const s = point.sunStatus;
+  const s = point.sunResult;
 
   return (
     <Marker position={[point.lat, point.lng]} icon={clickIcon}>
@@ -125,13 +159,8 @@ export function MapClickHandler({ date }: MapClickHandlerProps) {
                   <span>Moln</span>
                   <span>{s.cloudCover}%</span>
                 </div>
-                {s.buildingShadow && (
-                  <div className="text-shady-foreground font-medium">
-                    Byggnadsskugga
-                  </div>
-                )}
                 {s.confidence !== "high" && (
-                  <div className="italic">Uppskattning (låg data)</div>
+                  <div className="italic">Uppskattning (utan byggnadsdata)</div>
                 )}
               </div>
             </div>
