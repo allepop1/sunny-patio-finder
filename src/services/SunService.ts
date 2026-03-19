@@ -143,15 +143,15 @@ function estimateBuildingRadius(building: Building): number {
 // ── OSM Overpass API – fetch nearby buildings with height data ──
 
 const osmCache = new Map<string, { buildings: Building[]; timestamp: number }>();
-const OSM_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const OSM_CACHE_TTL = 30 * 60 * 1000; // 30 minutes – buildings don't change often
 
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 
 async function fetchWithRetry(
   url: string,
   options: RequestInit,
-  maxRetries: number = 3,
-  baseDelayMs: number = 3000
+  maxRetries: number = 1,
+  baseDelayMs: number = 2000
 ): Promise<Response> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -159,7 +159,7 @@ async function fetchWithRetry(
       if (response.ok) return response;
 
       if (RETRYABLE_STATUSES.has(response.status) && attempt < maxRetries) {
-        const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 2000;
+        const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
         console.info(`Overpass ${response.status}, retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${maxRetries})`);
         await new Promise((r) => setTimeout(r, delay));
         continue;
@@ -168,8 +168,7 @@ async function fetchWithRetry(
       throw new Error(`Overpass API error: ${response.status}`);
     } catch (error) {
       if (attempt < maxRetries && error instanceof TypeError) {
-        // Network error — retry
-        const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 2000;
+        const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
         console.info(`Overpass network error, retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${maxRetries})`);
         await new Promise((r) => setTimeout(r, delay));
         continue;

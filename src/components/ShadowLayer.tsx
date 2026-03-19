@@ -48,6 +48,7 @@ export function ShadowLayer({ date }: ShadowLayerProps) {
 
   useEffect(() => {
     let cancelled = false;
+    let debounceTimer: ReturnType<typeof setTimeout>;
 
     async function loadShadows() {
       const center = map.getCenter();
@@ -70,11 +71,15 @@ export function ShadowLayer({ date }: ShadowLayerProps) {
 
     loadShadows();
 
-    const onMoveEnd = () => loadShadows();
+    const onMoveEnd = () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => loadShadows(), 800);
+    };
     map.on("moveend", onMoveEnd);
 
     return () => {
       cancelled = true;
+      clearTimeout(debounceTimer);
       map.off("moveend", onMoveEnd);
     };
   }, [map, date]);
