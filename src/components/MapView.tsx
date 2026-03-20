@@ -5,6 +5,7 @@ import { Venue } from "@/services/SunService";
 import { VenueCard } from "./VenueCard";
 import { ShadowLayer } from "./ShadowLayer";
 import { MapClickHandler } from "./MapClickHandler";
+import { SunPositionIndicator } from "./SunPositionIndicator";
 import { useEffect } from "react";
 
 // Fix leaflet default icon issue
@@ -55,6 +56,7 @@ export function MapView({ venues, center, onVenueSelect, selectedVenue, selected
         url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
       />
       <ShadowLayer date={selectedDate ?? new Date()} />
+      <SunPositionIndicator date={selectedDate ?? new Date()} />
       <MapClickHandler date={selectedDate ?? new Date()} />
       {venues.map((venue) => (
         <Marker
