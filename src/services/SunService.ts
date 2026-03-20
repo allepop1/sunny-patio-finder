@@ -219,14 +219,7 @@ export async function fetchBuildingsFromOSM(
   `;
 
   try {
-    const response = await fetchWithRetry(
-      "https://overpass-api.de/api/interpreter",
-      {
-        method: "POST",
-        body: `data=${encodeURIComponent(query)}`,
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      }
-    );
+    const response = await fetchWithFallback(query);
 
     const data = await response.json();
     const buildings: Building[] = data.elements
