@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { Marker, Popup, useMapEvents } from "react-leaflet";
 import L from "leaflet";
-import { Sun, Cloud, Loader2, MapPin } from "lucide-react";
-import { getSolarPosition } from "@/services/SunService";
+import { Sun, Cloud, Loader2, MapPin, Building2 } from "lucide-react";
+import { getSolarPosition, fetchBuildingsFromOSM, isPointInBuildingShadow } from "@/services/SunService";
 import { fetchWeather } from "@/services/WeatherService";
 
 const clickIcon = L.divIcon({
@@ -20,6 +20,7 @@ interface SunResult {
   solarAltitude: number;
   cloudCover: number;
   confidence: "high" | "medium" | "low";
+  buildingShadow: boolean;
 }
 
 interface ClickedPoint {
@@ -28,6 +29,7 @@ interface ClickedPoint {
   sunResult: SunResult | null;
   loading: boolean;
   address: string | null;
+  refining: boolean; // building data loading in background
 }
 
 interface MapClickHandlerProps {
@@ -54,12 +56,12 @@ async function reverseGeocode(lat: number, lng: number): Promise<string | null> 
   }
 }
 
-/** Fast sun check: solar position + weather only (no Overpass building query) */
+/** Phase 1: Fast sun check (solar position + weather, no buildings) */
 async function quickSunCheck(lat: number, lng: number, date: Date): Promise<SunResult> {
   const solar = getSolarPosition(date, lat, lng);
 
   if (solar.altitude <= 0) {
-    return { isSunny: false, solarAltitude: solar.altitude, cloudCover: 0, confidence: "high" };
+    return { isSunny: false, solarAltitude: solar.altitude, cloudCover: 0, confidence: "high", buildingShadow: false };
   }
 
   const weather = await fetchWeather(lat, lng);
@@ -69,8 +71,34 @@ async function quickSunCheck(lat: number, lng: number, date: Date): Promise<SunR
     isSunny: cloudCover < 70 && solar.altitude > 0,
     solarAltitude: solar.altitude,
     cloudCover,
-    confidence: "low", // no building data
+    confidence: "low",
+    buildingShadow: false,
   };
+}
+
+/** Phase 2: Refine with building shadow data */
+async function refineSunCheck(lat: number, lng: number, date: Date, base: SunResult): Promise<SunResult> {
+  const solar = getSolarPosition(date, lat, lng);
+  if (solar.altitude <= 0) return { ...base, confidence: "high" };
+
+  try {
+    const buildings = await fetchBuildingsFromOSM(lat, lng, 200);
+    let buildingShadow = false;
+
+    for (const building of buildings) {
+      if (isPointInBuildingShadow(lat, lng, building, solar.azimuth, solar.altitude)) {
+        buildingShadow = true;
+        break;
+      }
+    }
+
+    const confidence = buildings.length > 0 ? "high" : "low";
+    const isSunny = !buildingShadow && base.cloudCover < 70;
+
+    return { ...base, isSunny, buildingShadow, confidence };
+  } catch {
+    return base; // keep quick result on failure
+  }
 }
 
 export function MapClickHandler({ date }: MapClickHandlerProps) {
@@ -81,16 +109,21 @@ export function MapClickHandler({ date }: MapClickHandlerProps) {
     click: async (e) => {
       const { lat, lng } = e.latlng;
       const id = ++clickIdRef.current;
-      setPoint({ lat, lng, sunResult: null, loading: true, address: null });
+      setPoint({ lat, lng, sunResult: null, loading: true, address: null, refining: false });
 
-      // Run sun check and geocode in parallel – both are fast
+      // Phase 1: quick result + geocode
       const [result, address] = await Promise.all([
         quickSunCheck(lat, lng, date),
         reverseGeocode(lat, lng),
       ]);
 
-      if (id !== clickIdRef.current) return; // stale click
-      setPoint({ lat, lng, sunResult: result, loading: false, address });
+      if (id !== clickIdRef.current) return;
+      setPoint({ lat, lng, sunResult: result, loading: false, address, refining: true });
+
+      // Phase 2: refine with building data in background
+      const refined = await refineSunCheck(lat, lng, date, result);
+      if (id !== clickIdRef.current) return;
+      setPoint({ lat, lng, sunResult: refined, loading: false, address, refining: false });
     },
   });
 
@@ -99,12 +132,17 @@ export function MapClickHandler({ date }: MapClickHandlerProps) {
     if (!point || point.loading) return;
     const { lat, lng, address } = point;
     const id = ++clickIdRef.current;
-    setPoint((prev) => prev ? { ...prev, loading: true } : null);
+    setPoint((prev) => prev ? { ...prev, loading: true, refining: false } : null);
 
-    quickSunCheck(lat, lng, date).then((result) => {
+    (async () => {
+      const result = await quickSunCheck(lat, lng, date);
       if (id !== clickIdRef.current) return;
-      setPoint({ lat, lng, sunResult: result, loading: false, address });
-    });
+      setPoint({ lat, lng, sunResult: result, loading: false, address, refining: true });
+
+      const refined = await refineSunCheck(lat, lng, date, result);
+      if (id !== clickIdRef.current) return;
+      setPoint({ lat, lng, sunResult: refined, loading: false, address, refining: false });
+    })();
   }, [date]);
 
   if (!point) return null;
@@ -159,7 +197,23 @@ export function MapClickHandler({ date }: MapClickHandlerProps) {
                   <span>Moln</span>
                   <span>{s.cloudCover}%</span>
                 </div>
-                {s.confidence !== "high" && (
+                {s.buildingShadow && (
+                  <div className="flex items-center gap-1 text-shady-foreground">
+                    <Building2 className="h-3 w-3" />
+                    <span>Byggnadsskugga</span>
+                  </div>
+                )}
+                {point.refining ? (
+                  <div className="flex items-center gap-1 italic">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    <span>Hämtar byggnadsdata…</span>
+                  </div>
+                ) : s.confidence === "high" ? (
+                  <div className="flex items-center gap-1 text-sunny-foreground">
+                    <Building2 className="h-3 w-3" />
+                    <span>Med byggnadsdata</span>
+                  </div>
+                ) : (
                   <div className="italic">Uppskattning (utan byggnadsdata)</div>
                 )}
               </div>
