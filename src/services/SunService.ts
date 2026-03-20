@@ -143,40 +143,59 @@ function estimateBuildingRadius(building: Building): number {
 // ── OSM Overpass API – fetch nearby buildings with height data ──
 
 const osmCache = new Map<string, { buildings: Building[]; timestamp: number }>();
-const OSM_CACHE_TTL = 30 * 60 * 1000; // 30 minutes – buildings don't change often
+const OSM_CACHE_TTL = 60 * 60 * 1000; // 60 minutes
+
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+];
 
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 
-async function fetchWithRetry(
-  url: string,
-  options: RequestInit,
+// Track which endpoint works best
+let preferredEndpointIndex = 0;
+
+async function fetchWithFallback(
+  query: string,
   maxRetries: number = 1,
   baseDelayMs: number = 2000
 ): Promise<Response> {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const response = await fetch(url, options);
-      if (response.ok) return response;
+  const body = `data=${encodeURIComponent(query)}`;
+  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
 
-      if (RETRYABLE_STATUSES.has(response.status) && attempt < maxRetries) {
-        const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
-        console.info(`Overpass ${response.status}, retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${maxRetries})`);
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
+  // Try preferred endpoint first, then cycle through others
+  for (let ep = 0; ep < OVERPASS_ENDPOINTS.length; ep++) {
+    const idx = (preferredEndpointIndex + ep) % OVERPASS_ENDPOINTS.length;
+    const url = OVERPASS_ENDPOINTS[idx];
 
-      throw new Error(`Overpass API error: ${response.status}`);
-    } catch (error) {
-      if (attempt < maxRetries && error instanceof TypeError) {
-        const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
-        console.info(`Overpass network error, retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${maxRetries})`);
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await fetch(url, { method: "POST", body, headers });
+        if (response.ok) {
+          preferredEndpointIndex = idx; // remember working endpoint
+          return response;
+        }
+
+        if (RETRYABLE_STATUSES.has(response.status) && attempt < maxRetries) {
+          const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+
+        // Non-retryable or exhausted retries – try next endpoint
+        break;
+      } catch (error) {
+        if (attempt < maxRetries && error instanceof TypeError) {
+          const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+        break; // try next endpoint
       }
-      throw error;
     }
   }
-  throw new Error("Overpass API: max retries exceeded");
+  throw new Error("All Overpass endpoints failed");
 }
 
 export async function fetchBuildingsFromOSM(
@@ -200,14 +219,7 @@ export async function fetchBuildingsFromOSM(
   `;
 
   try {
-    const response = await fetchWithRetry(
-      "https://overpass-api.de/api/interpreter",
-      {
-        method: "POST",
-        body: `data=${encodeURIComponent(query)}`,
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      }
-    );
+    const response = await fetchWithFallback(query);
 
     const data = await response.json();
     const buildings: Building[] = data.elements
