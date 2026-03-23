@@ -140,63 +140,13 @@ function estimateBuildingRadius(building: Building): number {
   return maxDist;
 }
 
-// ── OSM Overpass API – fetch nearby buildings with height data ──
+// ── OSM Overpass API – fetch nearby buildings via edge function proxy ──
 
 const osmCache = new Map<string, { buildings: Building[]; timestamp: number }>();
 const OSM_CACHE_TTL = 60 * 60 * 1000; // 60 minutes
 
-const OVERPASS_ENDPOINTS = [
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
-  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-];
-
-const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
-
-// Track which endpoint works best
-let preferredEndpointIndex = 0;
-
-async function fetchWithFallback(
-  query: string,
-  maxRetries: number = 1,
-  baseDelayMs: number = 2000
-): Promise<Response> {
-  const body = `data=${encodeURIComponent(query)}`;
-  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
-
-  // Try preferred endpoint first, then cycle through others
-  for (let ep = 0; ep < OVERPASS_ENDPOINTS.length; ep++) {
-    const idx = (preferredEndpointIndex + ep) % OVERPASS_ENDPOINTS.length;
-    const url = OVERPASS_ENDPOINTS[idx];
-
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        const response = await fetch(url, { method: "POST", body, headers });
-        if (response.ok) {
-          preferredEndpointIndex = idx; // remember working endpoint
-          return response;
-        }
-
-        if (RETRYABLE_STATUSES.has(response.status) && attempt < maxRetries) {
-          const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
-          await new Promise((r) => setTimeout(r, delay));
-          continue;
-        }
-
-        // Non-retryable or exhausted retries – try next endpoint
-        break;
-      } catch (error) {
-        if (attempt < maxRetries && error instanceof TypeError) {
-          const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
-          await new Promise((r) => setTimeout(r, delay));
-          continue;
-        }
-        break; // try next endpoint
-      }
-    }
-  }
-  throw new Error("All Overpass endpoints failed");
-}
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
 export async function fetchBuildingsFromOSM(
   lat: number,
@@ -219,10 +169,19 @@ export async function fetchBuildingsFromOSM(
   `;
 
   try {
-    const response = await fetchWithFallback(query);
+    const response = await fetch(`${SUPABASE_URL}/functions/v1/overpass-proxy`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": SUPABASE_ANON_KEY,
+      },
+      body: JSON.stringify({ query }),
+    });
+
+    if (!response.ok) throw new Error(`Proxy returned ${response.status}`);
 
     const data = await response.json();
-    const buildings: Building[] = data.elements
+    const buildings: Building[] = (data.elements || [])
       .filter((el: any) => el.geometry && el.geometry.length > 0)
       .map((el: any) => ({
         lat: el.geometry[0].lat,
@@ -236,7 +195,7 @@ export async function fetchBuildingsFromOSM(
     osmCache.set(cacheKey, { buildings, timestamp: Date.now() });
     return buildings;
   } catch (error) {
-    console.warn("OSM building fetch failed, using estimates:", error);
+    console.warn("Building fetch failed:", error);
     return [];
   }
 }
