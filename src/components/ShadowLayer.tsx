@@ -6,6 +6,7 @@ import {
   shadowLength,
   Building,
 } from "@/services/SunService";
+import { AlertTriangle } from "lucide-react";
 
 interface ShadowLayerProps {
   date: Date;
@@ -33,7 +34,6 @@ function computeShadowPolygon(
   const dLat = (sLen * Math.cos(shadowAzimuthRad)) / metersPerDegreeLat;
   const dLng = (sLen * Math.sin(shadowAzimuthRad)) / metersPerDegreeLng;
 
-  // Shadow polygon = building outline + projected outline (reversed)
   const projected: [number, number][] = building.polygon.map(([lat, lng]) => [
     lat + dLat,
     lng + dLng,
@@ -42,9 +42,26 @@ function computeShadowPolygon(
   return [...building.polygon, ...projected.reverse()];
 }
 
+function ShadowWarning({ visible }: { visible: boolean }) {
+  if (!visible) return null;
+
+  return (
+    <div
+      className="absolute bottom-3 left-3 z-[1000] flex items-center gap-2 rounded-lg bg-card/90 backdrop-blur-sm border border-border px-3 py-2 shadow-md"
+      style={{ pointerEvents: "auto" }}
+    >
+      <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
+      <span className="text-xs text-muted-foreground">
+        Byggnadsdata kunde inte laddas – skuggor kan saknas
+      </span>
+    </div>
+  );
+}
+
 export function ShadowLayer({ date }: ShadowLayerProps) {
   const map = useMap();
   const [shadows, setShadows] = useState<[number, number][][]>([]);
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -55,11 +72,18 @@ export function ShadowLayer({ date }: ShadowLayerProps) {
       const solar = getSolarPosition(date, center.lat, center.lng);
       if (solar.altitude <= 2) {
         setShadows([]);
+        setLoadError(false);
         return;
       }
 
       const buildings = await fetchBuildingsFromOSM(center.lat, center.lng, 500);
       if (cancelled) return;
+
+      if (buildings.length === 0 && solar.altitude > 5) {
+        setLoadError(true);
+      } else {
+        setLoadError(false);
+      }
 
       const polys: [number, number][][] = [];
       for (const b of buildings) {
@@ -98,6 +122,7 @@ export function ShadowLayer({ date }: ShadowLayerProps) {
           }}
         />
       ))}
+      <ShadowWarning visible={loadError} />
     </>
   );
 }
