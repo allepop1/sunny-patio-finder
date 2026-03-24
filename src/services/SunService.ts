@@ -69,8 +69,8 @@ export function isPointInBuildingShadow(
 ): boolean {
   if (solarAltitudeDeg <= 0) return true; // nighttime = shadow
 
-  const sLen = shadowLength(building.height, solarAltitudeDeg);
-  if (sLen > 500) return false; // shadow too long = unreliable, skip
+  const sLen = Math.min(shadowLength(building.height, solarAltitudeDeg), 200);
+  if (sLen <= 0) return false;
 
   // Building centroid
   const centroidLat =
@@ -162,8 +162,7 @@ export async function fetchBuildingsFromOSM(
   const query = `
     [out:json][timeout:10];
     (
-      way["building"]["building:height"](around:${radiusMeters},${lat},${lng});
-      way["building"]["height"](around:${radiusMeters},${lat},${lng});
+      way["building"](around:${radiusMeters},${lat},${lng});
     );
     out body geom;
   `;
@@ -187,7 +186,7 @@ export async function fetchBuildingsFromOSM(
         lat: el.geometry[0].lat,
         lng: el.geometry[0].lon,
         height: parseFloat(
-          el.tags["building:height"] || el.tags["height"] || "10"
+          el.tags["building:height"] || el.tags["height"] || "8"
         ),
         polygon: el.geometry.map((g: any) => [g.lat, g.lon] as [number, number]),
       }));

@@ -1,7 +1,9 @@
 import { Venue } from "@/services/SunService";
 
-// Curated list of popular outdoor dining spots in Stockholm
-export const stockholmVenues: Venue[] = [
+const GOOGLE_PLACES_API_KEY = import.meta.env.VITE_GOOGLE_PLACES_API_KEY;
+
+// Fallback list used when Google Places API key is not configured
+export const stockholmVenuesFallback: Venue[] = [
   {
     id: "1",
     name: "Mälarpaviljongen",
@@ -111,3 +113,90 @@ export const stockholmVenues: Venue[] = [
     openingHours: "11:30–01:00",
   },
 ];
+
+function formatOpeningHoursForToday(hours: any): string | undefined {
+  const descriptions: string[] | undefined = hours?.weekdayDescriptions;
+  if (!descriptions?.length) return undefined;
+  // Google's weekdayDescriptions starts on Monday (index 0); JS getDay() is 0=Sunday
+  const jsDay = new Date().getDay();
+  const googleDay = jsDay === 0 ? 6 : jsDay - 1;
+  const desc = descriptions[googleDay];
+  if (!desc) return undefined;
+  // Strip the day prefix, e.g. "Monday: 11:00 AM – 11:00 PM" → "11:00 AM – 11:00 PM"
+  const match = desc.match(/:\s*(.+)$/);
+  return match ? match[1] : undefined;
+}
+
+/**
+ * Fetch outdoor dining venues near a position using the Google Places API
+ * (Places API New – Nearby Search). Falls back to the static list when the
+ * API key is absent or the request fails.
+ *
+ * Requires VITE_GOOGLE_PLACES_API_KEY in the environment.
+ */
+export async function fetchVenuesFromGooglePlaces(
+  lat: number,
+  lng: number,
+  radiusMeters: number = 1000
+): Promise<Venue[]> {
+  if (!GOOGLE_PLACES_API_KEY) {
+    console.warn(
+      "VITE_GOOGLE_PLACES_API_KEY is not set – using static venue list"
+    );
+    return stockholmVenuesFallback;
+  }
+
+  try {
+    const response = await fetch(
+      "https://places.googleapis.com/v1/places:searchNearby",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+          "X-Goog-FieldMask": [
+            "places.id",
+            "places.displayName",
+            "places.formattedAddress",
+            "places.location",
+            "places.rating",
+            "places.regularOpeningHours",
+            "places.outdoorSeating",
+          ].join(","),
+        },
+        body: JSON.stringify({
+          includedTypes: ["restaurant", "bar", "cafe"],
+          maxResultCount: 20,
+          locationRestriction: {
+            circle: {
+              center: { latitude: lat, longitude: lng },
+              radius: radiusMeters,
+            },
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Places API returned ${response.status}`);
+    }
+
+    const data = await response.json();
+    const places: any[] = data.places ?? [];
+
+    // Prefer venues that explicitly advertise outdoor seating; include all
+    // restaurants/cafes regardless so the list is useful even without that tag.
+    return places.map((place, index) => ({
+      id: place.id ?? String(index),
+      name: place.displayName?.text ?? "Unknown venue",
+      address: place.formattedAddress ?? "",
+      lat: place.location?.latitude ?? lat,
+      lng: place.location?.longitude ?? lng,
+      rating: place.rating,
+      openingHours: formatOpeningHoursForToday(place.regularOpeningHours),
+    }));
+  } catch (error) {
+    console.warn("Google Places fetch failed, using static fallback:", error);
+    return stockholmVenuesFallback;
+  }
+}

@@ -3,7 +3,10 @@ import { MapView } from "@/components/MapView";
 import { SearchBar } from "@/components/SearchBar";
 import { VenueList } from "@/components/VenueList";
 import { TimeSlider } from "@/components/TimeSlider";
-import { stockholmVenues } from "@/data/stockholmVenues";
+import {
+  stockholmVenuesFallback,
+  fetchVenuesFromGooglePlaces,
+} from "@/data/stockholmVenues";
 import { calculateSunStatusForVenues, Venue } from "@/services/SunService";
 import { Sun, List, Map as MapIcon } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -11,7 +14,7 @@ import { motion, AnimatePresence } from "framer-motion";
 const STOCKHOLM_CENTER: [number, number] = [59.329, 18.069];
 
 const Index = () => {
-  const [venues, setVenues] = useState<Venue[]>(stockholmVenues);
+  const [venues, setVenues] = useState<Venue[]>(stockholmVenuesFallback);
   const [center, setCenter] = useState<[number, number]>(STOCKHOLM_CENTER);
   const [isLoading, setIsLoading] = useState(true);
   const [isLocating, setIsLocating] = useState(false);
@@ -20,15 +23,34 @@ const Index = () => {
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
+  // Keep a ref so loadSunStatus always sees the latest venue list without
+  // needing to be recreated every time baseVenues changes.
+  const baseVenuesRef = useRef<Venue[]>(stockholmVenuesFallback);
+
+  // Fetch venues from Google Places whenever the map center changes
+  // (e.g. after the user presses "Locate Me").
+  useEffect(() => {
+    let cancelled = false;
+    fetchVenuesFromGooglePlaces(center[0], center[1]).then((fetched) => {
+      if (cancelled) return;
+      baseVenuesRef.current = fetched;
+      setVenues(fetched); // show new venues immediately while sun status loads
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [center]);
+
   const loadSunStatus = useCallback(async (date: Date = new Date()) => {
     setIsLoading(true);
+    const currentVenues = baseVenuesRef.current;
     try {
-      const updated = await calculateSunStatusForVenues(stockholmVenues, date);
+      const updated = await calculateSunStatusForVenues(currentVenues, date);
       setVenues(updated);
     } catch (err) {
       console.error("Failed to calculate sun status:", err);
       setVenues(
-        stockholmVenues.map((v, i) => ({
+        currentVenues.map((v, i) => ({
           ...v,
           sunStatus: {
             isSunny: i % 3 !== 0,
@@ -74,7 +96,7 @@ const Index = () => {
 
   const handleSearch = (query: string) => {
     // Filter venues by name or address
-    const filtered = stockholmVenues.filter(
+    const filtered = baseVenuesRef.current.filter(
       (v) =>
         v.name.toLowerCase().includes(query.toLowerCase()) ||
         v.address.toLowerCase().includes(query.toLowerCase())
