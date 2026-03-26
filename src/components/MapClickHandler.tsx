@@ -1,8 +1,14 @@
 import { useState, useEffect, useRef } from "react";
 import { Marker, Popup, useMapEvents } from "react-leaflet";
 import L from "leaflet";
-import { Sun, Cloud, Loader2, MapPin, Building2 } from "lucide-react";
-import { getSolarPosition, fetchBuildingsFromOSM, isPointInBuildingShadow } from "@/services/SunService";
+import { Sun, Cloud, Loader2, MapPin } from "lucide-react";
+import {
+  getSolarPosition,
+  fetchBuildingsFromOSM,
+  isPointInBuildingShadow,
+  calculateSunWindow,
+  type SunWindow,
+} from "@/services/SunService";
 import { fetchWeather } from "@/services/WeatherService";
 
 const clickIcon = L.divIcon({
@@ -17,10 +23,8 @@ const clickIcon = L.divIcon({
 
 interface SunResult {
   isSunny: boolean;
-  solarAltitude: number;
-  cloudCover: number;
-  confidence: "high" | "medium" | "low";
-  buildingShadow: boolean;
+  sunWindow: SunWindow | null;
+  confidence: "high" | "low";
 }
 
 interface ClickedPoint {
@@ -29,7 +33,7 @@ interface ClickedPoint {
   sunResult: SunResult | null;
   loading: boolean;
   address: string | null;
-  refining: boolean; // building data loading in background
+  refining: boolean;
 }
 
 interface MapClickHandlerProps {
@@ -56,49 +60,65 @@ async function reverseGeocode(lat: number, lng: number): Promise<string | null> 
   }
 }
 
-/** Phase 1: Fast sun check (solar position + weather, no buildings) */
+/** Phase 1: solar position + weather only, no buildings. */
 async function quickSunCheck(lat: number, lng: number, date: Date): Promise<SunResult> {
   const solar = getSolarPosition(date, lat, lng);
-
-  if (solar.altitude <= 0) {
-    return { isSunny: false, solarAltitude: solar.altitude, cloudCover: 0, confidence: "high", buildingShadow: false };
-  }
-
   const weather = await fetchWeather(lat, lng);
   const cloudCover = weather?.cloudCover ?? 0;
-
-  return {
-    isSunny: cloudCover < 70 && solar.altitude > 0,
-    solarAltitude: solar.altitude,
-    cloudCover,
-    confidence: "low",
-    buildingShadow: false,
-  };
+  const isSunny = solar.altitude > 0 && cloudCover < 70;
+  const sunWindow = calculateSunWindow(lat, lng, [], weather, date);
+  return { isSunny, sunWindow, confidence: "low" };
 }
 
-/** Phase 2: Refine with building shadow data */
-async function refineSunCheck(lat: number, lng: number, date: Date, base: SunResult): Promise<SunResult> {
+/** Phase 2: refine with OSM building shadows. Weather is already cached. */
+async function refineSunCheck(lat: number, lng: number, date: Date): Promise<SunResult> {
   const solar = getSolarPosition(date, lat, lng);
-  if (solar.altitude <= 0) return { ...base, confidence: "high" };
+  const [buildings, weather] = await Promise.all([
+    fetchBuildingsFromOSM(lat, lng, 200),
+    fetchWeather(lat, lng), // returns from cache
+  ]);
+  const confidence = buildings.length > 0 ? "high" : "low";
 
-  try {
-    const buildings = await fetchBuildingsFromOSM(lat, lng, 200);
-    let buildingShadow = false;
-
-    for (const building of buildings) {
-      if (isPointInBuildingShadow(lat, lng, building, solar.azimuth, solar.altitude)) {
-        buildingShadow = true;
-        break;
-      }
-    }
-
-    const confidence = buildings.length > 0 ? "high" : "low";
-    const isSunny = !buildingShadow && base.cloudCover < 70;
-
-    return { ...base, isSunny, buildingShadow, confidence };
-  } catch {
-    return base; // keep quick result on failure
+  if (solar.altitude <= 0) {
+    const sunWindow = calculateSunWindow(lat, lng, buildings, weather, date);
+    return { isSunny: false, sunWindow, confidence };
   }
+
+  let buildingShadow = false;
+  for (const building of buildings) {
+    if (isPointInBuildingShadow(lat, lng, building, solar.azimuth, solar.altitude)) {
+      buildingShadow = true;
+      break;
+    }
+  }
+
+  const cloudCover = weather?.cloudCover ?? 0;
+  const isSunny = !buildingShadow && cloudCover < 70;
+  const sunWindow = calculateSunWindow(lat, lng, buildings, weather, date);
+  return { isSunny, sunWindow, confidence };
+}
+
+function fmtTime(date: Date): string {
+  return date.toLocaleTimeString("sv-SE", { hour: "2-digit", minute: "2-digit" });
+}
+
+function dayLabel(date: Date): "idag" | "imorgon" {
+  const now = new Date();
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  if (date.getFullYear() === now.getFullYear() &&
+      date.getMonth() === now.getMonth() &&
+      date.getDate() === now.getDate()) return "idag";
+  if (date.getFullYear() === tomorrow.getFullYear() &&
+      date.getMonth() === tomorrow.getMonth() &&
+      date.getDate() === tomorrow.getDate()) return "imorgon";
+  return "imorgon"; // within 30h lookahead this can only ever be today or tomorrow
+}
+
+function sunWindowLabel(w: SunWindow | null | undefined): string | null {
+  if (!w) return null;
+  if (w.type === "sunny_until") return `Sol till ${fmtTime(w.end)} ${dayLabel(w.end)}`;
+  if (w.start) return `Sol ${fmtTime(w.start)}–${fmtTime(w.end)} ${dayLabel(w.start)}`;
+  return null;
 }
 
 export function MapClickHandler({ date }: MapClickHandlerProps) {
@@ -111,7 +131,6 @@ export function MapClickHandler({ date }: MapClickHandlerProps) {
       const id = ++clickIdRef.current;
       setPoint({ lat, lng, sunResult: null, loading: true, address: null, refining: false });
 
-      // Phase 1: quick result + geocode
       const [result, address] = await Promise.all([
         quickSunCheck(lat, lng, date),
         reverseGeocode(lat, lng),
@@ -120,14 +139,12 @@ export function MapClickHandler({ date }: MapClickHandlerProps) {
       if (id !== clickIdRef.current) return;
       setPoint({ lat, lng, sunResult: result, loading: false, address, refining: true });
 
-      // Phase 2: refine with building data in background
-      const refined = await refineSunCheck(lat, lng, date, result);
+      const refined = await refineSunCheck(lat, lng, date);
       if (id !== clickIdRef.current) return;
       setPoint({ lat, lng, sunResult: refined, loading: false, address, refining: false });
     },
   });
 
-  // Recalculate when date changes
   useEffect(() => {
     if (!point || point.loading) return;
     const { lat, lng, address } = point;
@@ -139,7 +156,7 @@ export function MapClickHandler({ date }: MapClickHandlerProps) {
       if (id !== clickIdRef.current) return;
       setPoint({ lat, lng, sunResult: result, loading: false, address, refining: true });
 
-      const refined = await refineSunCheck(lat, lng, date, result);
+      const refined = await refineSunCheck(lat, lng, date);
       if (id !== clickIdRef.current) return;
       setPoint({ lat, lng, sunResult: refined, loading: false, address, refining: false });
     })();
@@ -148,10 +165,14 @@ export function MapClickHandler({ date }: MapClickHandlerProps) {
   if (!point) return null;
 
   const s = point.sunResult;
+  const windowLabel = s?.confidence === "high"
+    ? (sunWindowLabel(s.sunWindow) ??
+        (!s.isSunny && s.sunWindow === null ? "Ingen sol de närmaste 48h" : null))
+    : null;
 
   return (
     <Marker position={[point.lat, point.lng]} icon={clickIcon}>
-      <Popup className="venue-popup" maxWidth={280} minWidth={240} autoPan>
+      <Popup className="venue-popup" maxWidth={280} minWidth={220} autoPan>
         <div className="p-1">
           {point.loading ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
@@ -160,10 +181,11 @@ export function MapClickHandler({ date }: MapClickHandlerProps) {
             </div>
           ) : s ? (
             <div>
-              <div className="flex items-center gap-2 mb-2">
+              {/* Status */}
+              <div className="flex items-center gap-2.5 mb-2.5">
                 <div
                   className={`flex items-center justify-center rounded-full p-2 ${
-                    s.isSunny ? "bg-sunny/20" : "bg-shady/20"
+                    s.isSunny ? "bg-sunny/20 animate-sun-pulse" : "bg-shady/20"
                   }`}
                 >
                   {s.isSunny ? (
@@ -172,51 +194,33 @@ export function MapClickHandler({ date }: MapClickHandlerProps) {
                     <Cloud className="h-5 w-5 text-shady" strokeWidth={2} />
                   )}
                 </div>
-                <span
-                  className={`text-base font-semibold ${
-                    s.isSunny ? "text-sunny-foreground" : "text-shady-foreground"
-                  }`}
-                >
-                  {s.isSunny ? "I solen ☀️" : "I skuggan"}
-                </span>
+                <div>
+                  <div
+                    className={`text-base font-semibold leading-tight ${
+                      s.isSunny ? "text-sunny-foreground" : "text-shady-foreground"
+                    }`}
+                  >
+                    {s.isSunny ? "I solen ☀️" : "I skuggan"}
+                  </div>
+                  {windowLabel && (
+                    <div className="text-xs text-muted-foreground mt-0.5">{windowLabel}</div>
+                  )}
+                </div>
               </div>
 
-              <div className="flex items-center gap-1 text-xs text-muted-foreground mb-2">
-                <MapPin className="h-3 w-3" />
-                <span>
-                  {point.address || `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`}
-                </span>
+              {/* Address */}
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <MapPin className="h-3 w-3 shrink-0" />
+                <span>{point.address || `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`}</span>
               </div>
 
-              <div className="space-y-1 text-xs text-muted-foreground">
-                <div className="flex justify-between">
-                  <span>Solhöjd</span>
-                  <span>{s.solarAltitude.toFixed(1)}°</span>
+              {/* Subtle refining indicator */}
+              {point.refining && (
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground mt-2 border-t border-border pt-2">
+                  <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                  <span>Hämtar exakt status…</span>
                 </div>
-                <div className="flex justify-between">
-                  <span>Moln</span>
-                  <span>{s.cloudCover}%</span>
-                </div>
-                {s.buildingShadow && (
-                  <div className="flex items-center gap-1 text-shady-foreground">
-                    <Building2 className="h-3 w-3" />
-                    <span>Byggnadsskugga</span>
-                  </div>
-                )}
-                {point.refining ? (
-                  <div className="flex items-center gap-1 italic">
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                    <span>Hämtar byggnadsdata…</span>
-                  </div>
-                ) : s.confidence === "high" ? (
-                  <div className="flex items-center gap-1 text-sunny-foreground">
-                    <Building2 className="h-3 w-3" />
-                    <span>Med byggnadsdata</span>
-                  </div>
-                ) : (
-                  <div className="italic">Uppskattning (utan byggnadsdata)</div>
-                )}
-              </div>
+              )}
             </div>
           ) : (
             <div className="text-sm text-muted-foreground py-2">

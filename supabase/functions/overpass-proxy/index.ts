@@ -19,7 +19,10 @@ serve(async (req) => {
   }
 
   try {
-    const { query } = await req.json();
+    // req.json() throws on empty / malformed bodies; result can be null
+    const parsed = await req.json().catch(() => null);
+    const query = parsed?.query;
+
     if (!query) {
       return new Response(JSON.stringify({ error: "Missing query" }), {
         status: 400,
@@ -34,10 +37,12 @@ serve(async (req) => {
       try {
         const response = await fetch(url, { method: "POST", body, headers });
         if (response.ok) {
-          const data = await response.json();
-          return new Response(JSON.stringify(data), {
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
+          const data = await response.json().catch(() => null);
+          if (data) {
+            return new Response(JSON.stringify(data), {
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
         }
         if (!RETRYABLE_STATUSES.has(response.status)) {
           break;
@@ -51,7 +56,8 @@ serve(async (req) => {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (error) {
-    return new Response(JSON.stringify({ error: error.message }), {
+    const message = error instanceof Error ? error.message : String(error ?? "Unknown error");
+    return new Response(JSON.stringify({ error: message }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

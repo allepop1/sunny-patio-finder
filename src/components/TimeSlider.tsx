@@ -40,7 +40,7 @@ export function TimeSlider({ onChange, isLoading }: TimeSliderProps) {
   };
 
   return (
-    <div className="px-4 py-3 bg-card border-b border-border">
+    <div className="px-4 py-3 pb-4 bg-card border-b border-border">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           {isDaytime ? (

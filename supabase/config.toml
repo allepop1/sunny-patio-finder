@@ -1,1 +1,10 @@
-project_id = "wrgzlnfbtsgkypctfjod"
+project_id = "mskgnaztiiiplddcfewy"
+
+[functions.places-proxy]
+verify_jwt = false
+
+[functions.get-weather]
+verify_jwt = false
+
+[functions.overpass-proxy]
+verify_jwt = false

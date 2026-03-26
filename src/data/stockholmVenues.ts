@@ -1,6 +1,5 @@
 import { Venue } from "@/services/SunService";
-
-const GOOGLE_PLACES_API_KEY = import.meta.env.VITE_GOOGLE_PLACES_API_KEY;
+import { supabase } from "@/integrations/supabase/client";
 
 // Fallback list used when Google Places API key is not configured
 export const stockholmVenuesFallback: Venue[] = [
@@ -114,89 +113,72 @@ export const stockholmVenuesFallback: Venue[] = [
   },
 ];
 
-function formatOpeningHoursForToday(hours: any): string | undefined {
-  const descriptions: string[] | undefined = hours?.weekdayDescriptions;
-  if (!descriptions?.length) return undefined;
-  // Google's weekdayDescriptions starts on Monday (index 0); JS getDay() is 0=Sunday
-  const jsDay = new Date().getDay();
-  const googleDay = jsDay === 0 ? 6 : jsDay - 1;
-  const desc = descriptions[googleDay];
-  if (!desc) return undefined;
-  // Strip the day prefix, e.g. "Monday: 11:00 AM – 11:00 PM" → "11:00 AM – 11:00 PM"
-  const match = desc.match(/:\s*(.+)$/);
-  return match ? match[1] : undefined;
-}
-
 /**
- * Fetch outdoor dining venues near a position using the Google Places API
- * (Places API New – Nearby Search). Falls back to the static list when the
- * API key is absent or the request fails.
- *
- * Requires VITE_GOOGLE_PLACES_API_KEY in the environment.
+ * Fetch outdoor dining venues near a position via the Supabase places-proxy
+ * edge function (which calls Google Places Nearby Search server-side to avoid
+ * CORS restrictions). Falls back to the static list on any error.
  */
 export async function fetchVenuesFromGooglePlaces(
   lat: number,
   lng: number,
-  radiusMeters: number = 1000
+  radiusMeters: number = 1500
 ): Promise<Venue[]> {
-  if (!GOOGLE_PLACES_API_KEY) {
-    console.warn(
-      "VITE_GOOGLE_PLACES_API_KEY is not set – using static venue list"
-    );
-    return stockholmVenuesFallback;
-  }
-
   try {
-    const response = await fetch(
-      "https://places.googleapis.com/v1/places:searchNearby",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
-          "X-Goog-FieldMask": [
-            "places.id",
-            "places.displayName",
-            "places.formattedAddress",
-            "places.location",
-            "places.rating",
-            "places.regularOpeningHours",
-            "places.outdoorSeating",
-          ].join(","),
-        },
-        body: JSON.stringify({
-          includedTypes: ["restaurant", "bar", "cafe"],
-          maxResultCount: 20,
-          locationRestriction: {
-            circle: {
-              center: { latitude: lat, longitude: lng },
-              radius: radiusMeters,
-            },
-          },
-        }),
-      }
-    );
+    const { data, error } = await supabase.functions.invoke("places-proxy", {
+      body: { lat, lng, radius: radiusMeters },
+    });
 
-    if (!response.ok) {
-      throw new Error(`Places API returned ${response.status}`);
+    if (error) throw error;
+
+    if (data.status !== "OK" && data.status !== "ZERO_RESULTS") {
+      throw new Error(`Places API status: ${data.status}`);
     }
 
-    const data = await response.json();
-    const places: any[] = data.places ?? [];
-
-    // Prefer venues that explicitly advertise outdoor seating; include all
-    // restaurants/cafes regardless so the list is useful even without that tag.
-    return places.map((place, index) => ({
-      id: place.id ?? String(index),
-      name: place.displayName?.text ?? "Unknown venue",
-      address: place.formattedAddress ?? "",
-      lat: place.location?.latitude ?? lat,
-      lng: place.location?.longitude ?? lng,
+    const results: any[] = data.results ?? [];
+    return results.map((place, index) => ({
+      id: place.place_id ?? String(index),
+      name: place.name ?? "Unknown venue",
+      address: place.vicinity ?? "",
+      lat: place.geometry?.location?.lat ?? lat,
+      lng: place.geometry?.location?.lng ?? lng,
       rating: place.rating,
-      openingHours: formatOpeningHoursForToday(place.regularOpeningHours),
     }));
   } catch (error) {
     console.warn("Google Places fetch failed, using static fallback:", error);
     return stockholmVenuesFallback;
+  }
+}
+
+/**
+ * Text search — finds venues matching a freetext query near a location.
+ * Returns an empty array (not the fallback) so callers can distinguish
+ * "no results" from "API error".
+ */
+export async function searchVenuesByText(
+  query: string,
+  lat: number,
+  lng: number
+): Promise<Venue[]> {
+  try {
+    const { data, error } = await supabase.functions.invoke("places-proxy", {
+      body: { query, lat, lng, radius: 5000 },
+    });
+
+    if (error) throw error;
+    if (data.status !== "OK" && data.status !== "ZERO_RESULTS") {
+      throw new Error(`Places API status: ${data.status}`);
+    }
+
+    return (data.results ?? []).map((place: any, index: number) => ({
+      id: place.place_id ?? String(index),
+      name: place.name ?? "Unknown venue",
+      address: place.vicinity ?? "",
+      lat: place.geometry?.location?.lat ?? lat,
+      lng: place.geometry?.location?.lng ?? lng,
+      rating: place.rating,
+    }));
+  } catch (error) {
+    console.warn("Places text search failed:", error);
+    return [];
   }
 }

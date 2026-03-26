@@ -6,7 +6,6 @@ import {
   shadowLength,
   Building,
 } from "@/services/SunService";
-import { AlertTriangle } from "lucide-react";
 
 interface ShadowLayerProps {
   date: Date;
@@ -110,26 +109,11 @@ function computeShadowPolygon(
   return poly.length >= 3 ? poly : null;
 }
 
-function ShadowWarning({ visible }: { visible: boolean }) {
-  if (!visible) return null;
-
-  return (
-    <div
-      className="absolute bottom-3 left-3 z-[1000] flex items-center gap-2 rounded-lg bg-card/90 backdrop-blur-sm border border-border px-3 py-2 shadow-md"
-      style={{ pointerEvents: "auto" }}
-    >
-      <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
-      <span className="text-xs text-muted-foreground">
-        Byggnadsdata kunde inte laddas – skuggor kan saknas
-      </span>
-    </div>
-  );
-}
+const SHADOW_MIN_ZOOM = 15;
 
 export function ShadowLayer({ date }: ShadowLayerProps) {
   const map = useMap();
   const [shadows, setShadows] = useState<[number, number][][]>([]);
-  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -137,42 +121,42 @@ export function ShadowLayer({ date }: ShadowLayerProps) {
 
     async function loadShadows() {
       const center = map.getCenter();
+      const zoom = map.getZoom();
       const solar = getSolarPosition(date, center.lat, center.lng);
-      if (solar.altitude <= 2) {
+
+      // Only render shadows at close zoom levels — avoids unnecessary Overpass
+      // requests and keeps the visual useful (wide-zoom shadows are meaningless).
+      if (zoom < SHADOW_MIN_ZOOM || solar.altitude <= 2) {
         setShadows([]);
-        setLoadError(false);
         return;
       }
 
       const buildings = await fetchBuildingsFromOSM(center.lat, center.lng, 500);
       if (cancelled) return;
 
-      if (buildings.length === 0 && solar.altitude > 5) {
-        setLoadError(true);
-      } else {
-        setLoadError(false);
-      }
-
       const polys: [number, number][][] = [];
       for (const b of buildings) {
         const poly = computeShadowPolygon(b, solar.azimuth, solar.altitude);
         if (poly) polys.push(poly);
       }
+
       setShadows(polys);
     }
 
     loadShadows();
 
-    const onMoveEnd = () => {
+    const onMapChange = () => {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => loadShadows(), 800);
     };
-    map.on("moveend", onMoveEnd);
+    map.on("moveend", onMapChange);
+    map.on("zoomend", onMapChange);
 
     return () => {
       cancelled = true;
       clearTimeout(debounceTimer);
-      map.off("moveend", onMoveEnd);
+      map.off("moveend", onMapChange);
+      map.off("zoomend", onMapChange);
     };
   }, [map, date]);
 
@@ -190,7 +174,6 @@ export function ShadowLayer({ date }: ShadowLayerProps) {
           }}
         />
       ))}
-      <ShadowWarning visible={loadError} />
     </>
   );
 }

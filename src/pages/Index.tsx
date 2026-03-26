@@ -1,85 +1,50 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { MapView } from "@/components/MapView";
 import { SearchBar } from "@/components/SearchBar";
-import { VenueList } from "@/components/VenueList";
 import { TimeSlider } from "@/components/TimeSlider";
-import {
-  stockholmVenuesFallback,
-  fetchVenuesFromGooglePlaces,
-} from "@/data/stockholmVenues";
-import { calculateSunStatusForVenues, Venue } from "@/services/SunService";
-import { Sun, List, Map as MapIcon } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
+import { stockholmVenuesFallback, searchVenuesByText } from "@/data/stockholmVenues";
+import { calculateSunStatus, SunStatus, Venue } from "@/services/SunService";
+import { Sun, Loader2 } from "lucide-react";
 
 const STOCKHOLM_CENTER: [number, number] = [59.329, 18.069];
 
 const Index = () => {
   const [venues, setVenues] = useState<Venue[]>(stockholmVenuesFallback);
   const [center, setCenter] = useState<[number, number]>(STOCKHOLM_CENTER);
-  const [isLoading, setIsLoading] = useState(true);
   const [isLocating, setIsLocating] = useState(false);
-  const [view, setView] = useState<"map" | "list">("map");
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [selectedVenue, setSelectedVenue] = useState<Venue | null>(null);
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
-  // Keep a ref so loadSunStatus always sees the latest venue list without
-  // needing to be recreated every time baseVenues changes.
+  // Refs so callbacks always see the latest values without stale closures.
   const baseVenuesRef = useRef<Venue[]>(stockholmVenuesFallback);
+  const selectedDateRef = useRef<Date>(selectedDate);
+  const statusCache = useRef<Map<string, SunStatus>>(new Map());
 
-  // Fetch venues from Google Places whenever the map center changes
-  // (e.g. after the user presses "Locate Me").
-  useEffect(() => {
-    let cancelled = false;
-    fetchVenuesFromGooglePlaces(center[0], center[1]).then((fetched) => {
-      if (cancelled) return;
-      baseVenuesRef.current = fetched;
-      setVenues(fetched); // show new venues immediately while sun status loads
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [center]);
+  useEffect(() => { selectedDateRef.current = selectedDate; }, [selectedDate]);
 
-  const loadSunStatus = useCallback(async (date: Date = new Date()) => {
-    setIsLoading(true);
-    const currentVenues = baseVenuesRef.current;
-    try {
-      const updated = await calculateSunStatusForVenues(currentVenues, date);
-      setVenues(updated);
-    } catch (err) {
-      console.error("Failed to calculate sun status:", err);
-      setVenues(
-        currentVenues.map((v, i) => ({
-          ...v,
-          sunStatus: {
-            isSunny: i % 3 !== 0,
-            buildingShadow: i % 3 === 0,
-            cloudCover: 0,
-            solarAltitude: 35,
-            solarAzimuth: 180,
-            confidence: "low" as const,
-          },
-        }))
-      );
-    } finally {
-      setIsLoading(false);
-    }
+  // Clear cache when time changes so re-opened popups re-fetch.
+  useEffect(() => { statusCache.current.clear(); }, [selectedDate]);
+
+  // Called by MapVenueLoader whenever the map is panned/zoomed.
+  const handleVenuesLoaded = useCallback((fetched: Venue[]) => {
+    baseVenuesRef.current = fetched;
+    setVenues(fetched);
   }, []);
 
   const handleTimeChange = useCallback((date: Date) => {
     setSelectedDate(date);
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
-      loadSunStatus(date);
-    }, 400);
-  }, [loadSunStatus]);
+  }, []);
 
-  useEffect(() => {
-    loadSunStatus(selectedDate);
-    const interval = setInterval(() => loadSunStatus(selectedDate), 10 * 60 * 1000);
-    return () => clearInterval(interval);
-  }, [loadSunStatus, selectedDate]);
+  // On-demand sun status fetch — called by VenueMarker on popup open.
+  const getVenueStatus = useCallback(async (venue: Venue): Promise<SunStatus> => {
+    const cached = statusCache.current.get(venue.id);
+    if (cached) return cached;
+    const status = await calculateSunStatus(venue.lat, venue.lng, selectedDateRef.current);
+    statusCache.current.set(venue.id, status);
+    return status;
+  }, []);
 
   const handleLocateMe = () => {
     if (!navigator.geolocation) return;
@@ -94,17 +59,26 @@ const Index = () => {
     );
   };
 
-  const handleSearch = (query: string) => {
-    // Filter venues by name or address
-    const filtered = baseVenuesRef.current.filter(
-      (v) =>
-        v.name.toLowerCase().includes(query.toLowerCase()) ||
-        v.address.toLowerCase().includes(query.toLowerCase())
-    );
-    if (filtered.length > 0) {
-      setCenter([filtered[0].lat, filtered[0].lng]);
+  const handleSearch = useCallback(async (query: string) => {
+    setIsSearching(true);
+    setSearchError(null);
+    statusCache.current.clear();
+    try {
+      const [searchLat, searchLng] = center;
+      const results = await searchVenuesByText(query, searchLat, searchLng);
+      if (results.length > 0) {
+        baseVenuesRef.current = results;
+        setVenues(results);
+        setCenter([results[0].lat, results[0].lng]);
+      } else {
+        setSearchError("Inga resultat hittades. Prova ett annat sökord.");
+      }
+    } catch {
+      setSearchError("Sökningen misslyckades. Kontrollera din internetanslutning.");
+    } finally {
+      setIsSearching(false);
     }
-  };
+  }, [center]);
 
   const currentTime = new Date().toLocaleTimeString("sv-SE", {
     hour: "2-digit",
@@ -121,8 +95,9 @@ const Index = () => {
             Solsidan
           </h1>
         </div>
-        <div className="text-sm text-muted-foreground font-body">
-          Stockholm · {currentTime}
+        <div className="flex items-center gap-2 text-sm text-muted-foreground font-body">
+          {isSearching && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+          <span>Stockholm · {currentTime}</span>
         </div>
       </header>
 
@@ -132,78 +107,27 @@ const Index = () => {
           onSearch={handleSearch}
           onLocateMe={handleLocateMe}
           isLocating={isLocating}
+          isSearching={isSearching}
         />
+        {searchError && (
+          <p className="mt-2 text-xs text-destructive">{searchError}</p>
+        )}
       </div>
 
       {/* Time Slider */}
-      <TimeSlider onChange={handleTimeChange} isLoading={isLoading} />
-
-      {/* View Toggle (mobile) */}
-      <div className="flex items-center gap-1 px-4 py-2 bg-background sm:hidden">
-        <button
-          onClick={() => setView("map")}
-          className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-            view === "map"
-              ? "bg-primary text-primary-foreground"
-              : "text-muted-foreground hover:bg-muted"
-          }`}
-        >
-          <MapIcon className="h-4 w-4" />
-          Karta
-        </button>
-        <button
-          onClick={() => setView("list")}
-          className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-            view === "list"
-              ? "bg-primary text-primary-foreground"
-              : "text-muted-foreground hover:bg-muted"
-          }`}
-        >
-          <List className="h-4 w-4" />
-          Lista
-        </button>
-      </div>
+      <TimeSlider onChange={handleTimeChange} isLoading={false} />
 
       {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Map – always visible on desktop, toggled on mobile */}
-        <div
-          className={`flex-1 ${
-            view === "map" ? "block" : "hidden sm:block"
-          }`}
-        >
-          <MapView
-            venues={venues}
-            center={center}
-            onVenueSelect={setSelectedVenue}
-            selectedVenue={selectedVenue}
-            selectedDate={selectedDate}
-          />
-        </div>
-
-        {/* Venue List Sidebar */}
-        <AnimatePresence>
-          <motion.div
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            className={`w-full sm:w-96 sm:border-l border-border overflow-y-auto bg-background p-4 ${
-              view === "list" ? "block" : "hidden sm:block"
-            }`}
-          >
-            <h2 className="font-display text-lg font-semibold text-foreground mb-3">
-              Uteserveringar
-            </h2>
-            <VenueList
-              venues={venues}
-              isLoading={isLoading}
-              onVenueClick={(venue) => {
-                setSelectedVenue(venue);
-                setCenter([venue.lat, venue.lng]);
-                setView("map");
-              }}
-            />
-          </motion.div>
-        </AnimatePresence>
+      <div className="flex-1 overflow-hidden">
+        <MapView
+          venues={venues}
+          center={center}
+          onVenueSelect={setSelectedVenue}
+          selectedVenue={selectedVenue}
+          selectedDate={selectedDate}
+          onVenuesLoaded={handleVenuesLoaded}
+          getVenueStatus={getVenueStatus}
+        />
       </div>
     </div>
   );

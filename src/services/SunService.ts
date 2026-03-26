@@ -1,5 +1,12 @@
 import SunCalc from "suncalc";
-import { fetchWeather, type WeatherData } from "./WeatherService";
+import { fetchWeather, type WeatherData, type ForecastItem } from "./WeatherService";
+
+export interface SunWindow {
+  /** "sunny_until" = currently sunny, will end at `end` */
+  type: "sunny_until" | "sunny_from";
+  start?: Date; // only set for "sunny_from"
+  end: Date;
+}
 
 export interface SunStatus {
   isSunny: boolean;
@@ -9,6 +16,7 @@ export interface SunStatus {
   solarAzimuth: number;
   confidence: "high" | "medium" | "low";
   weather?: WeatherData | null;
+  sunWindow?: SunWindow | null;
 }
 
 export interface Building {
@@ -140,13 +148,88 @@ function estimateBuildingRadius(building: Building): number {
   return maxDist;
 }
 
-// ── OSM Overpass API – fetch nearby buildings via edge function proxy ──
+// ── OSM Overpass API – fetch nearby buildings directly from browser ──
+
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+];
 
 const osmCache = new Map<string, { buildings: Building[]; timestamp: number }>();
-const OSM_CACHE_TTL = 60 * 60 * 1000; // 60 minutes
+const OSM_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours — buildings don't change day-to-day
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+// ── Global Overpass request queue ──
+// Serialises all Overpass network requests so only one is in-flight at a time,
+// with at least 2 seconds between successive request starts. This prevents the
+// 429 rate-limit errors that occur when ShadowLayer and venue popups fire
+// simultaneous requests.
+
+let _overpassTail: Promise<void> = Promise.resolve();
+let _lastOverpassStart = 0;
+const OVERPASS_MIN_INTERVAL_MS = 2000;
+
+function enqueueOverpass<T>(fn: () => Promise<T>): Promise<T> {
+  const result = _overpassTail.then(async (): Promise<T> => {
+    const wait = OVERPASS_MIN_INTERVAL_MS - (Date.now() - _lastOverpassStart);
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    _lastOverpassStart = Date.now();
+    return fn();
+  });
+  // Advance the tail (swallow errors so the queue never stalls)
+  _overpassTail = result.then(() => {}, () => {});
+  return result;
+}
+
+// Haversine distance in metres between two lat/lng points
+function distMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371000;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/**
+ * POST to Overpass with a 15-second browser timeout.
+ * Retries across two public mirrors with exponential backoff on
+ * rate-limit (429) or server errors (5xx). Throws on total failure.
+ */
+async function overpassFetch(query: string): Promise<any> {
+  const body = `data=${encodeURIComponent(query)}`;
+  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
+  const maxAttempts = OVERPASS_ENDPOINTS.length * 2; // try each endpoint twice
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const endpoint = OVERPASS_ENDPOINTS[attempt % OVERPASS_ENDPOINTS.length];
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15_000);
+
+    try {
+      const response = await fetch(endpoint, { method: "POST", headers, body, signal: controller.signal });
+      clearTimeout(timeoutId);
+
+      if (response.status === 429 || response.status >= 500) {
+        const delay = Math.pow(2, attempt) * 1000;
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+
+      if (!response.ok) throw new Error(`Overpass returned ${response.status}`);
+
+      return await response.json();
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (attempt < maxAttempts - 1) {
+        const delay = Math.pow(2, Math.min(attempt, 2)) * 500;
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  }
+  throw new Error("All Overpass endpoints failed");
+}
 
 export async function fetchBuildingsFromOSM(
   lat: number,
@@ -154,52 +237,156 @@ export async function fetchBuildingsFromOSM(
   radiusMeters: number = 200
 ): Promise<Building[]> {
   const cacheKey = `${lat.toFixed(3)},${lng.toFixed(3)},${radiusMeters}`;
+  const now = Date.now();
+
+  // Exact-key cache hit
   const cached = osmCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < OSM_CACHE_TTL) {
+  if (cached && now - cached.timestamp < OSM_CACHE_TTL) {
     return cached.buildings;
   }
 
-  const query = `
-    [out:json][timeout:10];
-    (
-      way["building"](around:${radiusMeters},${lat},${lng});
-    );
-    out body geom;
-  `;
+  // Covering-area cache hit: check whether any existing cache entry's circle
+  // fully contains the requested area. This lets ShadowLayer's large-radius
+  // fetch (r=500m around map centre) satisfy subsequent venue queries (r=200m)
+  // without a separate Overpass request, and vice-versa.
+  for (const [key, entry] of osmCache) {
+    if (now - entry.timestamp > OSM_CACHE_TTL) continue;
+    const parts = key.split(",");
+    const cLat = parseFloat(parts[0]);
+    const cLng = parseFloat(parts[1]);
+    const cRadius = parseFloat(parts[2]);
+    const dist = distMeters(lat, lng, cLat, cLng);
+    if (dist + radiusMeters <= cRadius + 50) {
+      return entry.buildings;
+    }
+  }
+
+  // Overpass query timeout matches the fetch AbortController timeout.
+  // Enqueue so at most one request is in-flight at a time.
+  const query = `[out:json][timeout:14];(way["building"](around:${radiusMeters},${lat},${lng}););out body geom;`;
 
   try {
-    const response = await fetch(`${SUPABASE_URL}/functions/v1/overpass-proxy`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "apikey": SUPABASE_ANON_KEY,
-      },
-      body: JSON.stringify({ query }),
-    });
-
-    if (!response.ok) throw new Error(`Proxy returned ${response.status}`);
-
-    const data = await response.json();
+    const data = await enqueueOverpass(() => overpassFetch(query));
     const buildings: Building[] = (data.elements || [])
       .filter((el: any) => el.geometry && el.geometry.length > 0)
       .map((el: any) => ({
         lat: el.geometry[0].lat,
         lng: el.geometry[0].lon,
-        height: parseFloat(
-          el.tags["building:height"] || el.tags["height"] || "8"
-        ),
+        height: parseFloat(el.tags?.["building:height"] || el.tags?.["height"] || "8"),
         polygon: el.geometry.map((g: any) => [g.lat, g.lon] as [number, number]),
       }));
 
     osmCache.set(cacheKey, { buildings, timestamp: Date.now() });
     return buildings;
   } catch (error) {
-    console.warn("Building fetch failed:", error);
+    console.warn("[fetchBuildingsFromOSM] all retries failed:", error);
     return [];
   }
 }
 
+// ── Sun time-window calculation ──
+
+const WINDOW_STEP_MS = 15 * 60 * 1000; // 15-minute steps
+const WINDOW_LOOKAHEAD_MS = 30 * 60 * 60 * 1000; // look 30 h ahead (today + tomorrow)
+
+/**
+ * Look up cloud cover from the hourly forecast for a given moment.
+ * Finds the last forecast entry whose timestamp is ≤ the query time
+ * (i.e. the most recently known value). Falls back to `fallback` when
+ * the forecast array is empty or the time is before all entries.
+ */
+function getCloudCoverAt(forecast: ForecastItem[], date: Date, fallback: number): number {
+  const t = date.getTime();
+  let result = fallback;
+  for (const f of forecast) {
+    if (f.time <= t) result = f.cloudCover;
+    else break; // forecast is chronological; no need to scan further
+  }
+  return result;
+}
+
+function isVenueSunnyAt(
+  lat: number,
+  lng: number,
+  buildings: Building[],
+  forecast: ForecastItem[],
+  fallbackCloudCover: number,
+  date: Date
+): boolean {
+  const solar = getSolarPosition(date, lat, lng);
+  if (solar.altitude <= 5) return false;
+  if (getCloudCoverAt(forecast, date, fallbackCloudCover) >= 70) return false;
+  return !buildings.some((b) =>
+    isPointInBuildingShadow(lat, lng, b, solar.azimuth, solar.altitude)
+  );
+}
+
+/**
+ * Stepping forward in 15-minute increments from `fromDate`:
+ * - If currently sunny → returns when the sun will disappear.
+ * - If currently shaded → returns the next continuous sunny period.
+ * Uses per-hour cloud cover from the weather forecast so that tomorrow's
+ * sun window is accurate even when it's overcast right now.
+ */
+export function calculateSunWindow(
+  lat: number,
+  lng: number,
+  buildings: Building[],
+  weather: WeatherData | null,
+  fromDate: Date
+): SunWindow | null {
+  const forecast = weather?.forecast ?? [];
+  const fallbackCloudCover = weather?.cloudCover ?? 0;
+  const limit = fromDate.getTime() + WINDOW_LOOKAHEAD_MS;
+
+  const check = (t: number) =>
+    isVenueSunnyAt(lat, lng, buildings, forecast, fallbackCloudCover, new Date(t));
+
+  const currentlySunny = check(fromDate.getTime());
+
+  if (currentlySunny) {
+    for (let t = fromDate.getTime() + WINDOW_STEP_MS; t < limit; t += WINDOW_STEP_MS) {
+      if (!check(t)) {
+        return { type: "sunny_until" as const, end: new Date(t) };
+      }
+    }
+    return null; // sunny for entire lookahead window
+  }
+
+  let sunStart: number | null = null;
+  for (let t = fromDate.getTime() + WINDOW_STEP_MS; t < limit; t += WINDOW_STEP_MS) {
+    const sunny = check(t);
+    if (sunny && sunStart === null) {
+      sunStart = t;
+    } else if (!sunny && sunStart !== null) {
+      return { type: "sunny_from" as const, start: new Date(sunStart), end: new Date(t) };
+    }
+  }
+  if (sunStart !== null) {
+    return { type: "sunny_from" as const, start: new Date(sunStart), end: new Date(limit) };
+  }
+  return null;
+}
+
 // ── Main SunService ──
+
+/**
+ * Fast synchronous estimate using solar position only — no API calls.
+ * Sun altitude > 5° is treated as potentially sunny; lower angles and
+ * night are treated as not sunny. Confidence is always "low" because
+ * clouds and building shadows are not yet considered.
+ */
+export function quickSunStatus(lat: number, lng: number, date: Date): SunStatus {
+  const solar = getSolarPosition(date, lat, lng);
+  return {
+    isSunny: solar.altitude > 5,
+    buildingShadow: false,
+    cloudCover: 0,
+    solarAltitude: solar.altitude,
+    solarAzimuth: solar.azimuth,
+    confidence: "low",
+  };
+}
 
 export async function calculateSunStatus(
   venueLat: number,
@@ -208,50 +395,43 @@ export async function calculateSunStatus(
 ): Promise<SunStatus> {
   const solar = getSolarPosition(date, venueLat, venueLng);
 
-  // Sun below horizon
+  // Fetch weather and buildings concurrently — both are needed for the
+  // sun-window calculation regardless of whether the sun is currently up.
+  // Buildings are cached after the first call so subsequent fetches are free.
+  const [weather, buildings] = await Promise.all([
+    fetchWeather(venueLat, venueLng),
+    fetchBuildingsFromOSM(venueLat, venueLng, 200),
+  ]);
+  const cloudCover = weather?.cloudCover ?? 0;
+  const confidence: "high" | "medium" | "low" = buildings.length > 0 ? "high" : "low";
+
+  // Sun below horizon — no shadow check needed, but pass buildings so the
+  // window calculation can account for them in future daytime steps.
   if (solar.altitude <= 0) {
+    const sunWindow = calculateSunWindow(venueLat, venueLng, buildings, weather, date);
     return {
       isSunny: false,
       buildingShadow: false,
-      cloudCover: 0,
+      cloudCover,
       solarAltitude: solar.altitude,
       solarAzimuth: solar.azimuth,
-      confidence: "high",
+      confidence,
+      weather,
+      sunWindow,
     };
   }
 
-  // Fetch buildings
-  const buildings = await fetchBuildingsFromOSM(venueLat, venueLng, 200);
-
   let buildingShadow = false;
-  let confidence: "high" | "medium" | "low" = buildings.length > 0 ? "high" : "low";
 
   for (const building of buildings) {
-    if (
-      isPointInBuildingShadow(
-        venueLat,
-        venueLng,
-        building,
-        solar.azimuth,
-        solar.altitude
-      )
-    ) {
+    if (isPointInBuildingShadow(venueLat, venueLng, building, solar.azimuth, solar.altitude)) {
       buildingShadow = true;
       break;
     }
   }
 
-  // If no buildings found, use low confidence but assume sunny
-  if (buildings.length === 0) {
-    confidence = "low";
-  }
-
-  // Fetch real cloud cover from OpenWeatherMap
-  const weather = await fetchWeather(venueLat, venueLng);
-  const cloudCover = weather?.cloudCover ?? 0;
-
-  // Combine: sunny only if no building shadow AND not too cloudy
   const isSunny = !buildingShadow && cloudCover < 70;
+  const sunWindow = calculateSunWindow(venueLat, venueLng, buildings, weather, date);
 
   return {
     isSunny,
@@ -261,6 +441,7 @@ export async function calculateSunStatus(
     solarAzimuth: solar.azimuth,
     confidence,
     weather,
+    sunWindow,
   };
 }
 
