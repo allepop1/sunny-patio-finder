@@ -371,19 +371,22 @@ export function getFacadePoint(
         const edgeLen = Math.sqrt(ex * ex + ey * ey);
         if (edgeLen === 0) continue;
 
-        // CCW perpendicular unit vector: rotate (ex, ey) by 90° CCW → (-ey, ex)
-        const nx = -ey / edgeLen; // lng-direction component (metres)
-        const ny = ex / edgeLen;  // lat-direction component (metres)
+        // Determine the outward direction using the building centroid.
+        // The centroid is always inside the polygon, so centroid→edge always
+        // points outward (toward the street), even when the geocode lands
+        // exactly on a vertex and "toward venue" would be a zero vector.
+        let centLat = 0, centLng = 0;
+        for (let j = 0; j < n; j++) { centLat += ring[j][0]; centLng += ring[j][1]; }
+        centLat /= n; centLng /= n;
 
-        // Choose the perpendicular that points toward the venue (away from
-        // building interior), by checking the dot product with the venue direction.
-        const toVenueX = (venueLng - cLng) * mPerDegLng;
-        const toVenueY = (venueLat - cLat) * mPerDegLat;
-        const sign = nx * toVenueX + ny * toVenueY >= 0 ? 1 : -1;
+        const outX = (cLng - centLng) * mPerDegLng;
+        const outY = (cLat - centLat) * mPerDegLat;
+        const outLen = Math.sqrt(outX * outX + outY * outY);
+        if (outLen === 0) continue;
 
         // Step FACADE_OFFSET_M metres outward from the facade
-        bestLat = cLat + (sign * ny * FACADE_OFFSET_M) / mPerDegLat;
-        bestLng = cLng + (sign * nx * FACADE_OFFSET_M) / mPerDegLng;
+        bestLat = cLat + (outY / outLen) * FACADE_OFFSET_M / mPerDegLat;
+        bestLng = cLng + (outX / outLen) * FACADE_OFFSET_M / mPerDegLng;
       }
     }
   }
