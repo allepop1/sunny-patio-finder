@@ -284,6 +284,117 @@ export async function fetchBuildingsFromOSM(
   }
 }
 
+// ── Facade point calculation ──
+
+/**
+ * Closest point on segment A-B to point P, computed in metric space so
+ * the unequal lat/lng degree scales don't distort the result.
+ * Returns the point as [lat, lng] degrees.
+ */
+function closestPointOnSegment(
+  pLat: number, pLng: number,
+  aLat: number, aLng: number,
+  bLat: number, bLng: number,
+  mPerDegLat: number, mPerDegLng: number
+): [number, number] {
+  // Translate to origin at A, then work in metres
+  const bx = (bLng - aLng) * mPerDegLng;
+  const by = (bLat - aLat) * mPerDegLat;
+  const px = (pLng - aLng) * mPerDegLng;
+  const py = (pLat - aLat) * mPerDegLat;
+  const len2 = bx * bx + by * by;
+  if (len2 === 0) return [aLat, aLng];
+  const t = Math.max(0, Math.min(1, (px * bx + py * by) / len2));
+  return [aLat + t * (bLat - aLat), aLng + t * (bLng - aLng)];
+}
+
+/**
+ * Find the point 3 m outside the street-facing facade of the closest
+ * building polygon to the venue's address coordinates.
+ *
+ * Address coordinates from Google Places are placed at the street-side of
+ * a building (or on the pavement immediately in front of it), so the edge of
+ * any nearby building polygon that is closest to those coordinates is the
+ * facade facing the street. We step 3 m outward along that edge's normal
+ * (away from the building interior, toward the street) so that shadow checks
+ * reflect where a terrace patron actually sits rather than the building centroid.
+ *
+ * Falls back to the original venue coordinates when:
+ *  - No buildings were fetched (Overpass unavailable)
+ *  - The closest building edge is more than 30 m away (open area / park)
+ */
+export function getFacadePoint(
+  venueLat: number,
+  venueLng: number,
+  buildings: Building[]
+): { lat: number; lng: number } {
+  if (buildings.length === 0) return { lat: venueLat, lng: venueLng };
+
+  const FACADE_OFFSET_M = 3;
+  const MAX_SNAP_M = 30; // ignore buildings further than this
+  const mPerDegLat = 111320;
+  const mPerDegLng = 111320 * Math.cos((venueLat * Math.PI) / 180);
+
+  let bestDistM = Infinity;
+  let bestLat = venueLat;
+  let bestLng = venueLng;
+
+  for (const building of buildings) {
+    const ring = building.polygon;
+    // Ignore duplicate closing vertex that OSM polygons often include
+    const n =
+      ring.length > 1 &&
+      ring[0][0] === ring[ring.length - 1][0] &&
+      ring[0][1] === ring[ring.length - 1][1]
+        ? ring.length - 1
+        : ring.length;
+    if (n < 2) continue;
+
+    for (let i = 0; i < n; i++) {
+      const [aLat, aLng] = ring[i];
+      const [bLat, bLng] = ring[(i + 1) % n];
+
+      const [cLat, cLng] = closestPointOnSegment(
+        venueLat, venueLng, aLat, aLng, bLat, bLng, mPerDegLat, mPerDegLng
+      );
+
+      const dLatM = (cLat - venueLat) * mPerDegLat;
+      const dLngM = (cLng - venueLng) * mPerDegLng;
+      const distM = Math.sqrt(dLatM * dLatM + dLngM * dLngM);
+
+      if (distM < bestDistM) {
+        bestDistM = distM;
+
+        // Edge vector in metres (x = east / lng, y = north / lat)
+        const ex = (bLng - aLng) * mPerDegLng;
+        const ey = (bLat - aLat) * mPerDegLat;
+        const edgeLen = Math.sqrt(ex * ex + ey * ey);
+        if (edgeLen === 0) continue;
+
+        // CCW perpendicular unit vector: rotate (ex, ey) by 90° CCW → (-ey, ex)
+        const nx = -ey / edgeLen; // lng-direction component (metres)
+        const ny = ex / edgeLen;  // lat-direction component (metres)
+
+        // Choose the perpendicular that points toward the venue (away from
+        // building interior), by checking the dot product with the venue direction.
+        const toVenueX = (venueLng - cLng) * mPerDegLng;
+        const toVenueY = (venueLat - cLat) * mPerDegLat;
+        const sign = nx * toVenueX + ny * toVenueY >= 0 ? 1 : -1;
+
+        // Step FACADE_OFFSET_M metres outward from the facade
+        bestLat = cLat + (sign * ny * FACADE_OFFSET_M) / mPerDegLat;
+        bestLng = cLng + (sign * nx * FACADE_OFFSET_M) / mPerDegLng;
+      }
+    }
+  }
+
+  // If the closest edge is too far away the venue is in an open area — use
+  // the original coordinates so we don't snap to an unrelated building.
+  if (bestDistM > MAX_SNAP_M) return { lat: venueLat, lng: venueLng };
+
+  return { lat: bestLat, lng: bestLng };
+}
+
 // ── Sun time-window calculation ──
 
 const WINDOW_STEP_MS = 15 * 60 * 1000; // 15-minute steps
@@ -405,10 +516,16 @@ export async function calculateSunStatus(
   const cloudCover = weather?.cloudCover ?? 0;
   const confidence: "high" | "medium" | "low" = buildings.length > 0 ? "high" : "low";
 
+  // Find the street-facing facade point — this is where a terrace patron
+  // actually sits, 3 m outside the closest building edge to the address.
+  // All shadow and sun-window checks use this point instead of the raw
+  // geocoded venue coordinate, which may be inside or behind the building.
+  const { lat: checkLat, lng: checkLng } = getFacadePoint(venueLat, venueLng, buildings);
+
   // Sun below horizon — no shadow check needed, but pass buildings so the
   // window calculation can account for them in future daytime steps.
   if (solar.altitude <= 0) {
-    const sunWindow = calculateSunWindow(venueLat, venueLng, buildings, weather, date);
+    const sunWindow = calculateSunWindow(checkLat, checkLng, buildings, weather, date);
     return {
       isSunny: false,
       buildingShadow: false,
@@ -424,14 +541,14 @@ export async function calculateSunStatus(
   let buildingShadow = false;
 
   for (const building of buildings) {
-    if (isPointInBuildingShadow(venueLat, venueLng, building, solar.azimuth, solar.altitude)) {
+    if (isPointInBuildingShadow(checkLat, checkLng, building, solar.azimuth, solar.altitude)) {
       buildingShadow = true;
       break;
     }
   }
 
   const isSunny = !buildingShadow && cloudCover < 70;
-  const sunWindow = calculateSunWindow(venueLat, venueLng, buildings, weather, date);
+  const sunWindow = calculateSunWindow(checkLat, checkLng, buildings, weather, date);
 
   return {
     isSunny,
