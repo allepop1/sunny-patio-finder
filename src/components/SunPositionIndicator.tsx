@@ -110,13 +110,6 @@ export function SunPositionIndicator({ date }: SunPositionIndicatorProps) {
               )}
             </div>
 
-            <span
-              className={`text-[9px] font-semibold tabular-nums leading-none mt-0.5 ${
-                isAboveHorizon ? "text-sunny-foreground" : "text-muted-foreground"
-              }`}
-            >
-              {position.altitude.toFixed(0)}°
-            </span>
           </div>
         </motion.div>
       </AnimatePresence>

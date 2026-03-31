@@ -10,8 +10,9 @@ interface VenueListProps {
 }
 
 export function VenueList({ venues, isLoading, onVenueClick }: VenueListProps) {
-  const sunnyCount = venues.filter((v) => v.sunStatus?.isSunny).length;
-  const shadyCount = venues.length - sunnyCount;
+  const checkedVenues = venues.filter((v) => v.sunStatus !== undefined);
+  const sunnyCount = checkedVenues.filter((v) => v.sunStatus!.isSunny).length;
+  const shadyCount = checkedVenues.length - sunnyCount;
 
   if (isLoading) {
     return (
@@ -30,14 +31,19 @@ export function VenueList({ venues, isLoading, onVenueClick }: VenueListProps) {
     <div className="space-y-4">
       {/* Summary */}
       <div className="flex items-center gap-4 text-sm text-muted-foreground">
-        <div className="flex items-center gap-1.5">
-          <Sun className="h-4 w-4 text-sunny" />
-          <span>{sunnyCount} i solen</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <Cloud className="h-4 w-4 text-shady" />
-          <span>{shadyCount} i skuggan</span>
-        </div>
+        <span>{venues.length} uteserveringar</span>
+        {checkedVenues.length > 0 && (
+          <>
+            <div className="flex items-center gap-1.5">
+              <Sun className="h-4 w-4 text-sunny" />
+              <span>{sunnyCount} i solen</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <Cloud className="h-4 w-4 text-shady" />
+              <span>{shadyCount} i skuggan</span>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Venue Cards */}
