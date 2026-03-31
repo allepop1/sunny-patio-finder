@@ -166,7 +166,7 @@ const OSM_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours — buildings don't chang
 
 let _overpassTail: Promise<void> = Promise.resolve();
 let _lastOverpassStart = 0;
-const OVERPASS_MIN_INTERVAL_MS = 2000;
+const OVERPASS_MIN_INTERVAL_MS = 5000; // max 1 request per 5 seconds
 
 function enqueueOverpass<T>(fn: () => Promise<T>): Promise<T> {
   const result = _overpassTail.then(async (): Promise<T> => {
@@ -211,8 +211,13 @@ async function overpassFetch(query: string): Promise<any> {
       const response = await fetch(endpoint, { method: "POST", headers, body, signal: controller.signal });
       clearTimeout(timeoutId);
 
-      if (response.status === 429 || response.status >= 500) {
-        const delay = Math.pow(2, attempt) * 1000;
+      if (response.status === 429 || response.status === 504) {
+        // Rate-limited or gateway timeout — wait 10 s before trying next endpoint
+        await new Promise((r) => setTimeout(r, 10_000));
+        continue;
+      }
+      if (response.status >= 500) {
+        const delay = Math.pow(2, Math.min(attempt, 3)) * 1000;
         await new Promise((r) => setTimeout(r, delay));
         continue;
       }

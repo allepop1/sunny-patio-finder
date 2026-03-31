@@ -36,14 +36,17 @@ serve(async (req) => {
       });
     }
 
-    // Open-Meteo — free, no API key required
-    // forecast_days=2 gives 48 hourly entries, covering the 30-hour sun-window lookahead
+    // Open-Meteo — free, no API key required.
+    // timeformat=unixtime returns all timestamps as Unix seconds (UTC), avoiding
+    // the ambiguity of local datetime strings (Deno runs in UTC but Open-Meteo
+    // returns local times when timezone=auto — they'd be misread as UTC).
+    // forecast_days=2 gives 48 hourly entries for the 30-hour sun-window lookahead.
     const url =
       `https://api.open-meteo.com/v1/forecast` +
       `?latitude=${lat}&longitude=${lng}` +
       `&current=temperature_2m,relative_humidity_2m,cloud_cover,wind_speed_10m,weather_code` +
       `&hourly=temperature_2m,cloud_cover,weather_code` +
-      `&forecast_days=2&timezone=auto`;
+      `&forecast_days=2&timezone=auto&timeformat=unixtime`;
 
     const res = await fetch(url);
     if (!res.ok) {
@@ -57,12 +60,12 @@ serve(async (req) => {
 
     const { description, icon } = describeWMO(current.weather_code ?? 0);
 
-    // Return all hourly entries (48 hours = 2 days) for sun-window calculation
-    const times: string[] = hourly.time ?? [];
-    const forecast = times.map((t: string, i: number) => {
+    // hourly.time is now an array of Unix timestamps (seconds) — multiply by 1000 for ms.
+    const times: number[] = hourly.time ?? [];
+    const forecast = times.map((t: number, i: number) => {
       const { description: fd, icon: fi } = describeWMO(hourly.weather_code?.[i] ?? 0);
       return {
-        time: new Date(t).getTime(),
+        time: t * 1000,
         cloudCover: hourly.cloud_cover?.[i] ?? 0,
         temperature: hourly.temperature_2m?.[i] ?? 0,
         weatherDescription: fd,
