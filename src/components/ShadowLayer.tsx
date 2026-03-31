@@ -143,11 +143,11 @@ export function ShadowLayer({ date }: ShadowLayerProps) {
       setShadows(polys);
     }
 
-    loadShadows();
+    loadShadows().catch(() => {});
 
     const onMapChange = () => {
       clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => loadShadows(), 800);
+      debounceTimer = setTimeout(() => loadShadows().catch(() => {}), 800);
     };
     map.on("moveend", onMapChange);
     map.on("zoomend", onMapChange);
