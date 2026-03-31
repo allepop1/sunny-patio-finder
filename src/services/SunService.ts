@@ -326,75 +326,112 @@ function closestPointOnSegment(
 export function getFacadePoint(
   venueLat: number,
   venueLng: number,
-  buildings: Building[]
+  buildings: Building[],
+  debug = false
 ): { lat: number; lng: number } {
-  if (buildings.length === 0) return { lat: venueLat, lng: venueLng };
+  if (buildings.length === 0) {
+    if (debug) console.log("[getFacadePoint] No buildings — using venue coords");
+    return { lat: venueLat, lng: venueLng };
+  }
 
   const FACADE_OFFSET_M = 3;
-  const MAX_SNAP_M = 30; // ignore buildings further than this
+  const MAX_SNAP_M = 30; // ignore edges further than this
   const mPerDegLat = 111320;
   const mPerDegLng = 111320 * Math.cos((venueLat * Math.PI) / 180);
 
-  let bestDistM = Infinity;
+  if (debug) {
+    console.log(`[getFacadePoint] venue=(${venueLat.toFixed(6)}, ${venueLng.toFixed(6)}) buildings=${buildings.length}`);
+  }
+
+  // Strategy: find the building edge whose outward normal (centroid → edge midpoint)
+  // most closely aligns with the centroid → venue direction. This identifies the
+  // facade that "faces" the entrance side regardless of where the geocode is placed.
+  let bestDot = -Infinity;
   let bestLat = venueLat;
   let bestLng = venueLng;
+  let anyNearby = false;
+  let bestEdgeInfo = "";
 
   for (const building of buildings) {
     const ring = building.polygon;
-    // Ignore duplicate closing vertex that OSM polygons often include
     const n =
       ring.length > 1 &&
       ring[0][0] === ring[ring.length - 1][0] &&
       ring[0][1] === ring[ring.length - 1][1]
         ? ring.length - 1
         : ring.length;
-    if (n < 2) continue;
+    if (n < 3) continue;
+
+    // Centroid
+    let centLat = 0, centLng = 0;
+    for (let j = 0; j < n; j++) { centLat += ring[j][0]; centLng += ring[j][1]; }
+    centLat /= n; centLng /= n;
+
+    if (debug) {
+      const d = distMeters(venueLat, venueLng, centLat, centLng);
+      console.log(`[getFacadePoint]   building centroid=(${centLat.toFixed(6)}, ${centLng.toFixed(6)}) dist=${d.toFixed(1)}m height=${building.height}m`);
+    }
+
+    // Unit vector from centroid toward venue (metric space)
+    const toVenueX = (venueLng - centLng) * mPerDegLng;
+    const toVenueY = (venueLat - centLat) * mPerDegLat;
+    const toVenueLen = Math.sqrt(toVenueX * toVenueX + toVenueY * toVenueY);
+    if (toVenueLen === 0) continue;
+    const toVenueNX = toVenueX / toVenueLen;
+    const toVenueNY = toVenueY / toVenueLen;
 
     for (let i = 0; i < n; i++) {
       const [aLat, aLng] = ring[i];
       const [bLat, bLng] = ring[(i + 1) % n];
 
-      const [cLat, cLng] = closestPointOnSegment(
-        venueLat, venueLng, aLat, aLng, bLat, bLng, mPerDegLat, mPerDegLng
-      );
+      // Outward normal direction: centroid → edge midpoint
+      const midLat = (aLat + bLat) / 2;
+      const midLng = (aLng + bLng) / 2;
+      const normalX = (midLng - centLng) * mPerDegLng;
+      const normalY = (midLat - centLat) * mPerDegLat;
+      const normalLen = Math.sqrt(normalX * normalX + normalY * normalY);
+      if (normalLen === 0) continue;
 
-      const dLatM = (cLat - venueLat) * mPerDegLat;
-      const dLngM = (cLng - venueLng) * mPerDegLng;
-      const distM = Math.sqrt(dLatM * dLatM + dLngM * dLngM);
+      // Alignment score: 1.0 = normal points exactly at venue, -1.0 = opposite
+      const dot = (normalX / normalLen) * toVenueNX + (normalY / normalLen) * toVenueNY;
 
-      if (distM < bestDistM) {
-        bestDistM = distM;
+      if (dot > bestDot) {
+        // Only accept edges within snap distance of the venue
+        const [cLat, cLng] = closestPointOnSegment(
+          venueLat, venueLng, aLat, aLng, bLat, bLng, mPerDegLat, mPerDegLng
+        );
+        const dLatM = (cLat - venueLat) * mPerDegLat;
+        const dLngM = (cLng - venueLng) * mPerDegLng;
+        const edgeDistM = Math.sqrt(dLatM * dLatM + dLngM * dLngM);
 
-        // Edge vector in metres (x = east / lng, y = north / lat)
-        const ex = (bLng - aLng) * mPerDegLng;
-        const ey = (bLat - aLat) * mPerDegLat;
-        const edgeLen = Math.sqrt(ex * ex + ey * ey);
-        if (edgeLen === 0) continue;
+        if (edgeDistM <= MAX_SNAP_M) {
+          anyNearby = true;
+          bestDot = dot;
+          bestLat = cLat + (normalY / normalLen) * FACADE_OFFSET_M / mPerDegLat;
+          bestLng = cLng + (normalX / normalLen) * FACADE_OFFSET_M / mPerDegLng;
 
-        // Determine the outward direction using the building centroid.
-        // The centroid is always inside the polygon, so centroid→edge always
-        // points outward (toward the street), even when the geocode lands
-        // exactly on a vertex and "toward venue" would be a zero vector.
-        let centLat = 0, centLng = 0;
-        for (let j = 0; j < n; j++) { centLat += ring[j][0]; centLng += ring[j][1]; }
-        centLat /= n; centLng /= n;
-
-        const outX = (cLng - centLng) * mPerDegLng;
-        const outY = (cLat - centLat) * mPerDegLat;
-        const outLen = Math.sqrt(outX * outX + outY * outY);
-        if (outLen === 0) continue;
-
-        // Step FACADE_OFFSET_M metres outward from the facade
-        bestLat = cLat + (outY / outLen) * FACADE_OFFSET_M / mPerDegLat;
-        bestLng = cLng + (outX / outLen) * FACADE_OFFSET_M / mPerDegLng;
+          if (debug) {
+            const outBearing = ((Math.atan2(normalX / normalLen, normalY / normalLen) * 180) / Math.PI + 360) % 360;
+            const ex = (bLng - aLng) * mPerDegLng;
+            const ey = (bLat - aLat) * mPerDegLat;
+            const edgeBearing = ((Math.atan2(ex, ey) * 180) / Math.PI + 360) % 360;
+            bestEdgeInfo = `edge[${i}→${(i+1)%n}] edgeBearing=${edgeBearing.toFixed(1)}° outward=${outBearing.toFixed(1)}° dot=${dot.toFixed(3)} edgeDist=${edgeDistM.toFixed(1)}m`;
+          }
+        }
       }
     }
   }
 
-  // If the closest edge is too far away the venue is in an open area — use
-  // the original coordinates so we don't snap to an unrelated building.
-  if (bestDistM > MAX_SNAP_M) return { lat: venueLat, lng: venueLng };
+  if (debug) {
+    if (!anyNearby) {
+      console.log(`[getFacadePoint] No edge within ${MAX_SNAP_M}m → using venue coords (open area)`);
+    } else {
+      console.log(`[getFacadePoint] Selected: ${bestEdgeInfo}`);
+      console.log(`[getFacadePoint] Facade point=(${bestLat.toFixed(6)}, ${bestLng.toFixed(6)})`);
+    }
+  }
 
+  if (!anyNearby) return { lat: venueLat, lng: venueLng };
   return { lat: bestLat, lng: bestLng };
 }
 
@@ -523,7 +560,14 @@ export async function calculateSunStatus(
   // actually sits, 3 m outside the closest building edge to the address.
   // All shadow and sun-window checks use this point instead of the raw
   // geocoded venue coordinate, which may be inside or behind the building.
-  const { lat: checkLat, lng: checkLng } = getFacadePoint(venueLat, venueLng, buildings);
+  const DEBUG = (window as any).__SUN_DEBUG === true;
+  const { lat: checkLat, lng: checkLng } = getFacadePoint(venueLat, venueLng, buildings, DEBUG);
+
+  if (DEBUG) {
+    console.log(`[calculateSunStatus] venue=(${venueLat.toFixed(6)},${venueLng.toFixed(6)}) → checkPt=(${checkLat.toFixed(6)},${checkLng.toFixed(6)})`);
+    console.log(`[calculateSunStatus] solar: altitude=${solar.altitude.toFixed(1)}° azimuth=${solar.azimuth.toFixed(1)}° cloudCover=${cloudCover}%`);
+    console.log(`[calculateSunStatus] buildings fetched: ${buildings.length}`);
+  }
 
   // Sun below horizon — no shadow check needed, but pass buildings so the
   // window calculation can account for them in future daytime steps.
@@ -544,7 +588,14 @@ export async function calculateSunStatus(
   let buildingShadow = false;
 
   for (const building of buildings) {
-    if (isPointInBuildingShadow(checkLat, checkLng, building, solar.azimuth, solar.altitude)) {
+    const inShadow = isPointInBuildingShadow(checkLat, checkLng, building, solar.azimuth, solar.altitude);
+    if (DEBUG && inShadow) {
+      const centLat = building.polygon.reduce((s, p) => s + p[0], 0) / building.polygon.length;
+      const centLng = building.polygon.reduce((s, p) => s + p[1], 0) / building.polygon.length;
+      const d = distMeters(checkLat, checkLng, centLat, centLng);
+      console.log(`[calculateSunStatus] SHADOW from building centroid=(${centLat.toFixed(6)},${centLng.toFixed(6)}) dist=${d.toFixed(1)}m h=${building.height}m`);
+    }
+    if (inShadow) {
       buildingShadow = true;
       break;
     }
