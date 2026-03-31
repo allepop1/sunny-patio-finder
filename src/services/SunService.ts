@@ -1,5 +1,6 @@
 import SunCalc from "suncalc";
 import { fetchWeather, type WeatherData, type ForecastItem } from "./WeatherService";
+import { isInStockholmBbox, getBuildingsNear } from "./BuildingCache";
 
 export interface SunWindow {
   /** "sunny_until" = currently sunny, will end at `end` */
@@ -239,19 +240,25 @@ export async function fetchBuildingsFromOSM(
   lng: number,
   radiusMeters: number = 200
 ): Promise<Building[]> {
+  // Use the pre-built Stockholm cache for points inside the coverage bbox —
+  // no network request, no rate limits, instant after the one-time file load.
+  if (isInStockholmBbox(lat, lng)) {
+    try {
+      return await getBuildingsNear(lat, lng, radiusMeters);
+    } catch {
+      // Fall through to Overpass if the static file fails to load
+    }
+  }
+
+  // Outside Stockholm (or static file unavailable) — fall back to Overpass.
   const cacheKey = `${lat.toFixed(3)},${lng.toFixed(3)},${radiusMeters}`;
   const now = Date.now();
 
-  // Exact-key cache hit
   const cached = osmCache.get(cacheKey);
   if (cached && now - cached.timestamp < OSM_CACHE_TTL) {
     return cached.buildings;
   }
 
-  // Covering-area cache hit: check whether any existing cache entry's circle
-  // fully contains the requested area. This lets ShadowLayer's large-radius
-  // fetch (r=500m around map centre) satisfy subsequent venue queries (r=200m)
-  // without a separate Overpass request, and vice-versa.
   for (const [key, entry] of osmCache) {
     if (now - entry.timestamp > OSM_CACHE_TTL) continue;
     const parts = key.split(",");
@@ -259,15 +266,10 @@ export async function fetchBuildingsFromOSM(
     const cLng = parseFloat(parts[1]);
     const cRadius = parseFloat(parts[2]);
     const dist = distMeters(lat, lng, cLat, cLng);
-    if (dist + radiusMeters <= cRadius + 50) {
-      return entry.buildings;
-    }
+    if (dist + radiusMeters <= cRadius + 50) return entry.buildings;
   }
 
-  // Overpass query timeout matches the fetch AbortController timeout.
-  // Enqueue so at most one request is in-flight at a time.
   const query = `[out:json][timeout:14];(way["building"](around:${radiusMeters},${lat},${lng}););out body geom;`;
-
   try {
     const data = await enqueueOverpass(() => overpassFetch(query));
     const buildings: Building[] = (data.elements || [])
@@ -275,10 +277,9 @@ export async function fetchBuildingsFromOSM(
       .map((el: any) => ({
         lat: el.geometry[0].lat,
         lng: el.geometry[0].lon,
-        height: parseFloat(el.tags?.["building:height"] || el.tags?.["height"] || "8"),
+        height: parseFloat(el.tags?.["building:height"] || el.tags?.["height"] || "12"),
         polygon: el.geometry.map((g: any) => [g.lat, g.lon] as [number, number]),
       }));
-
     osmCache.set(cacheKey, { buildings, timestamp: Date.now() });
     return buildings;
   } catch {
