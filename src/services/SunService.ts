@@ -166,7 +166,7 @@ const OSM_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours — buildings don't chang
 
 let _overpassTail: Promise<void> = Promise.resolve();
 let _lastOverpassStart = 0;
-const OVERPASS_MIN_INTERVAL_MS = 5000; // max 1 request per 5 seconds
+const OVERPASS_MIN_INTERVAL_MS = 10_000; // max 1 request per 10 seconds
 
 function enqueueOverpass<T>(fn: () => Promise<T>): Promise<T> {
   const result = _overpassTail.then(async (): Promise<T> => {
@@ -193,9 +193,11 @@ function distMeters(lat1: number, lng1: number, lat2: number, lng2: number): num
 }
 
 /**
- * POST to Overpass with a 15-second browser timeout.
- * Retries across two public mirrors with exponential backoff on
- * rate-limit (429) or server errors (5xx). Throws on total failure.
+ * POST to Overpass with a 25-second browser timeout.
+ * Retries across two public mirrors with exponential backoff:
+ *   429 / 504 → 10 s, 20 s, 40 s between retries
+ *   other 5xx → same schedule
+ * Throws on total failure so the caller can fall back gracefully.
  */
 async function overpassFetch(query: string): Promise<any> {
   const body = `data=${encodeURIComponent(query)}`;
@@ -205,30 +207,26 @@ async function overpassFetch(query: string): Promise<any> {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const endpoint = OVERPASS_ENDPOINTS[attempt % OVERPASS_ENDPOINTS.length];
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15_000);
+    const timeoutId = setTimeout(() => controller.abort(), 25_000);
 
     try {
       const response = await fetch(endpoint, { method: "POST", headers, body, signal: controller.signal });
       clearTimeout(timeoutId);
 
-      if (response.status === 429 || response.status === 504) {
-        // Rate-limited or gateway timeout — wait 10 s before trying next endpoint
-        await new Promise((r) => setTimeout(r, 10_000));
-        continue;
-      }
-      if (response.status >= 500) {
-        const delay = Math.pow(2, Math.min(attempt, 3)) * 1000;
+      if (response.status === 429 || response.status === 504 || response.status >= 500) {
+        // Exponential backoff: 10 s → 20 s → 40 s
+        const delay = 10_000 * Math.pow(2, Math.min(attempt, 2));
         await new Promise((r) => setTimeout(r, delay));
         continue;
       }
 
-      if (!response.ok) throw new Error(`Overpass returned ${response.status}`);
+      if (!response.ok) throw new Error(`Overpass ${response.status}`);
 
       return await response.json();
     } catch (err) {
       clearTimeout(timeoutId);
       if (attempt < maxAttempts - 1) {
-        const delay = Math.pow(2, Math.min(attempt, 2)) * 500;
+        const delay = 10_000 * Math.pow(2, Math.min(attempt, 2));
         await new Promise((r) => setTimeout(r, delay));
       }
     }
@@ -283,8 +281,7 @@ export async function fetchBuildingsFromOSM(
 
     osmCache.set(cacheKey, { buildings, timestamp: Date.now() });
     return buildings;
-  } catch (error) {
-    console.warn("[fetchBuildingsFromOSM] all retries failed:", error);
+  } catch {
     return [];
   }
 }
