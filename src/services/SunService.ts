@@ -1,6 +1,19 @@
 import SunCalc from "suncalc";
 import { fetchWeather, type WeatherData, type ForecastItem } from "./WeatherService";
-import { isInStockholmBbox, getBuildingsNear } from "./BuildingCache";
+import { supabase } from "@/integrations/supabase/client";
+
+// Stockholm coverage bbox — same as the Supabase buildings table extent
+const STOCKHOLM_BBOX = {
+  minLat: 59.20, maxLat: 59.45,
+  minLng: 17.85, maxLng: 18.25,
+};
+
+function isInStockholmBbox(lat: number, lng: number): boolean {
+  return (
+    lat >= STOCKHOLM_BBOX.minLat && lat <= STOCKHOLM_BBOX.maxLat &&
+    lng >= STOCKHOLM_BBOX.minLng && lng <= STOCKHOLM_BBOX.maxLng
+  );
+}
 
 export interface SunWindow {
   /** "sunny_until" = currently sunny, will end at `end` */
@@ -240,13 +253,24 @@ export async function fetchBuildingsFromOSM(
   lng: number,
   radiusMeters: number = 200
 ): Promise<Building[]> {
-  // Use the pre-built Stockholm cache for points inside the coverage bbox —
-  // no network request, no rate limits, instant after the one-time file load.
+  // Use the Supabase buildings table for points inside the Stockholm coverage bbox.
   if (isInStockholmBbox(lat, lng)) {
     try {
-      return await getBuildingsNear(lat, lng, radiusMeters);
+      const { data, error } = await supabase.rpc("get_buildings_near", {
+        center_lat: lat,
+        center_lng: lng,
+        radius_m: radiusMeters,
+      });
+      if (!error && data && data.length > 0) {
+        return (data as any[]).map((row) => ({
+          lat: row.lat as number,
+          lng: row.lng as number,
+          height: row.height as number,
+          polygon: row.polygon as [number, number][],
+        }));
+      }
     } catch {
-      // Fall through to Overpass if the static file fails to load
+      // Fall through to Overpass if Supabase is unavailable
     }
   }
 
