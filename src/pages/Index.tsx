@@ -2,14 +2,14 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { MapView } from "@/components/MapView";
 import { SearchBar } from "@/components/SearchBar";
 import { TimeSlider } from "@/components/TimeSlider";
-import { stockholmVenuesFallback, searchVenuesByText } from "@/data/stockholmVenues";
+import { searchVenuesByText } from "@/data/stockholmVenues";
 import { calculateSunStatus, SunStatus, Venue } from "@/services/SunService";
 import { Sun, Loader2 } from "lucide-react";
 
 const STOCKHOLM_CENTER: [number, number] = [59.329, 18.069];
 
 const Index = () => {
-  const [venues, setVenues] = useState<Venue[]>(stockholmVenuesFallback);
+  const [venues, setVenues] = useState<Venue[]>([]);
   const [center, setCenter] = useState<[number, number]>(STOCKHOLM_CENTER);
   const [isLocating, setIsLocating] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
@@ -18,7 +18,7 @@ const Index = () => {
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
 
   // Refs so callbacks always see the latest values without stale closures.
-  const baseVenuesRef = useRef<Venue[]>(stockholmVenuesFallback);
+  const baseVenuesRef = useRef<Venue[]>([]);
   const selectedDateRef = useRef<Date>(selectedDate);
   const statusCache = useRef<Map<string, SunStatus>>(new Map());
 
