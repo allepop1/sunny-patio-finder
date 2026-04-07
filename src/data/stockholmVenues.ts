@@ -15,51 +15,80 @@ function distM(lat1: number, lng1: number, lat2: number, lng2: number): number {
 
 // Fallback for when both sources fail
 const FALLBACK: Venue[] = [
-  { id: "f1", name: "Mälarpaviljongen",      address: "Norr Mälarstrand 64",     lat: 59.3248, lng: 18.0530, rating: 4.3 },
-  { id: "f2", name: "Strandvägskajen",        address: "Strandvägen 2",           lat: 59.3310, lng: 18.0795, rating: 4.1 },
-  { id: "f3", name: "Trädgården",             address: "Hammarby Slussväg 2",     lat: 59.3060, lng: 18.0777, rating: 4.0 },
-  { id: "f4", name: "Under Kastanjen",        address: "Kindstugatan 1",          lat: 59.3235, lng: 18.0710, rating: 4.4 },
-  { id: "f5", name: "Rosendals Trädgårdskafé",address: "Rosendalsterrassen 12",   lat: 59.3265, lng: 18.1115, rating: 4.6 },
+  { id: "f1", name: "Mälarpaviljongen",       address: "Norr Mälarstrand 64",   lat: 59.3248, lng: 18.0530, rating: 4.3 },
+  { id: "f2", name: "Strandvägskajen",         address: "Strandvägen 2",         lat: 59.3310, lng: 18.0795, rating: 4.1 },
+  { id: "f3", name: "Trädgården",              address: "Hammarby Slussväg 2",   lat: 59.3060, lng: 18.0777, rating: 4.0 },
+  { id: "f4", name: "Under Kastanjen",         address: "Kindstugatan 1",        lat: 59.3235, lng: 18.0710, rating: 4.4 },
+  { id: "f5", name: "Rosendals Trädgårdskafé", address: "Rosendalsterrassen 12", lat: 59.3265, lng: 18.1115, rating: 4.6 },
 ];
 
+type UteRow = { id: number; lat: number; lng: number; address: string; kategorityp: string };
+
 /**
- * Primary venue source: query the uteserveringar Supabase table for all
- * official outdoor-seating permit locations near the map centre.
- * Concurrently fetch Google Places nearby results and match by proximity
- * (≤ 60 m) to enrich name and rating where available.
+ * Spatial dedup: if two permit points are within 20 m of each other, keep
+ * only the first (the import already deduped by address string, this catches
+ * variant suffixes like "20" vs "20A" at the same physical location).
  */
+function spatialDedup(rows: UteRow[]): UteRow[] {
+  const kept: UteRow[] = [];
+  for (const row of rows) {
+    const tooClose = kept.some((k) => distM(k.lat, k.lng, row.lat, row.lng) < 20);
+    if (!tooClose) kept.push(row);
+  }
+  return kept;
+}
+
 export async function fetchVenuesFromGooglePlaces(
   lat: number,
   lng: number,
   radiusMeters: number = 1500
 ): Promise<Venue[]> {
-  // ── 1. Supabase uteserveringar (primary) ──
-  const supabasePromise = supabase
-    .rpc("get_uteserveringar_near", {
-      center_lat: lat,
-      center_lng: lng,
-      radius_m: radiusMeters,
-    })
-    .then((r) => r.data as { id: number; lat: number; lng: number; address: string; kategorityp: string }[] | null);
 
-  // ── 2. Google Places nearby (for name + rating enrichment) ──
+  // ── 1. Supabase uteserveringar (primary) ──
+  console.log(`[uteserveringar] RPC (lat=${lat.toFixed(4)}, lng=${lng.toFixed(4)}, radius=${radiusMeters}m)`);
+  const supabasePromise = supabase
+    .rpc("get_uteserveringar_near", { center_lat: lat, center_lng: lng, radius_m: radiusMeters })
+    .then((r) => {
+      if (r.error) { console.error("[uteserveringar] RPC error:", r.error); return null; }
+      const rows = r.data as UteRow[] | null;
+      console.log(`[uteserveringar] RPC returned ${rows?.length ?? 0} rows`);
+      return rows;
+    });
+
+  // ── 2. Google Places nearby (name + rating enrichment) ──
   const placesPromise = supabase.functions
     .invoke("places-proxy", { body: { lat, lng, radius: radiusMeters } })
-    .then((r) => (r.error ? [] : (r.data?.results ?? [])) as any[])
-    .catch(() => [] as any[]);
+    .then((r) => {
+      if (r.error) { console.warn("[places] proxy error:", r.error); return [] as any[]; }
+      const results: any[] = r.data?.results ?? [];
+      console.log(`[places] ${results.length} results returned`);
+      if (results.length > 0) {
+        // Log a sample to verify coordinate shape
+        const s = results[0];
+        console.log(`[places] sample: "${s.name}" lat=${s.geometry?.location?.lat} lng=${s.geometry?.location?.lng}`);
+      }
+      return results;
+    })
+    .catch((e) => { console.warn("[places] fetch threw:", e); return [] as any[]; });
 
-  const [rows, places] = await Promise.all([supabasePromise, placesPromise]);
+  const [rawRows, places] = await Promise.all([supabasePromise, placesPromise]);
 
-  if (!rows || rows.length === 0) {
-    // Supabase failed — fall back to pure Google Places result
-    return placesToVenues(places) || FALLBACK;
+  if (!rawRows || rawRows.length === 0) {
+    console.warn("[uteserveringar] no rows — falling back to Google Places");
+    return placesToVenues(places).length > 0 ? placesToVenues(places) : FALLBACK;
   }
 
-  // ── 3. Match each uteservering to nearest Google Place (≤ 60 m) ──
+  // ── 3. Spatial dedup ──
+  const rows = spatialDedup(rawRows);
+  console.log(`[uteserveringar] ${rawRows.length} → ${rows.length} after spatial dedup (20m)`);
+
+  // ── 4. Match each uteservering to nearest Google Place (≤ 100 m) ──
+  const MATCH_M = 100;
+  let matched = 0;
+
   const venues: Venue[] = rows.map((row) => {
     let bestPlace: any = null;
-    let bestDist = 60; // metres threshold
-
+    let bestDist = MATCH_M;
     for (const p of places) {
       const pLat = p.geometry?.location?.lat;
       const pLng = p.geometry?.location?.lng;
@@ -67,7 +96,7 @@ export async function fetchVenuesFromGooglePlaces(
       const d = distM(row.lat, row.lng, pLat, pLng);
       if (d < bestDist) { bestDist = d; bestPlace = p; }
     }
-
+    if (bestPlace) matched++;
     return {
       id: String(row.id),
       name: bestPlace?.name ?? row.address,
@@ -77,6 +106,8 @@ export async function fetchVenuesFromGooglePlaces(
       rating: bestPlace?.rating,
     };
   });
+
+  console.log(`[places] matched ${matched}/${rows.length} uteserveringar with a Google Places name`);
 
   return venues;
 }
@@ -92,9 +123,6 @@ function placesToVenues(places: any[]): Venue[] {
   }));
 }
 
-/**
- * Text search — unchanged, still uses Google Places text search.
- */
 export async function searchVenuesByText(
   query: string,
   lat: number,
