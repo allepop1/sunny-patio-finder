@@ -1,5 +1,6 @@
 import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
 import L from "leaflet";
+import type { Marker as LeafletMarker } from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { Venue, SunStatus, SunWindow, quickSunStatus } from "@/services/SunService";
 import { fetchVenuesFromGooglePlaces } from "@/data/stockholmVenues";
@@ -202,27 +203,32 @@ function VenueMarker({
 }) {
   const [status, setStatus] = useState<SunStatus | null>(null);
   const [loading, setLoading] = useState(false);
+  const markerRef = useRef<LeafletMarker>(null);
 
-  // Step 1: instant estimate from solar position only.
-  // Once Step 2 (status) is fetched, the pin updates to reflect the accurate result.
   const quick = quickSunStatus(venue.lat, venue.lng, selectedDate);
-  const pinIcon = (status ?? quick).isSunny ? sunnyDotIcon : shadyDotIcon;
+  const isSunny = (status ?? quick).isSunny;
 
-  // When the selected time changes, invalidate the Step 2 cache so the
-  // next popup open triggers a fresh calculation.
+  // Imperatively update the Leaflet marker icon whenever sunny-state changes.
+  // react-leaflet's prop reconciliation skips setIcon while a popup is open,
+  // so we bypass it and call the Leaflet API directly.
+  useEffect(() => {
+    markerRef.current?.setIcon(isSunny ? sunnyDotIcon : shadyDotIcon);
+  }, [isSunny]);
+
+  // When the selected time changes, invalidate the cached status.
   useEffect(() => {
     setStatus(null);
   }, [selectedDate]);
 
   const handlePopupOpen = useCallback(async () => {
     onSelect?.(venue);
-    if (status) return; // Step 2 already fetched for this time
+    if (status) return;
     setLoading(true);
     try {
       const s = await getVenueStatus(venue);
       setStatus(s);
     } catch {
-      // Leave status null — popup will keep showing quick estimate
+      // Leave status null — popup keeps showing quick estimate
     } finally {
       setLoading(false);
     }
@@ -230,8 +236,9 @@ function VenueMarker({
 
   return (
     <Marker
+      ref={markerRef}
       position={[venue.lat, venue.lng]}
-      icon={pinIcon}
+      icon={isSunny ? sunnyDotIcon : shadyDotIcon}
       eventHandlers={{ popupopen: handlePopupOpen }}
     >
       <Popup className="venue-popup" maxWidth={280} minWidth={220}>
