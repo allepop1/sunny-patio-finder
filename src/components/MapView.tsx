@@ -1,12 +1,79 @@
 import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { Venue, SunStatus, quickSunStatus } from "@/services/SunService";
+import { Venue, SunStatus, SunWindow, quickSunStatus } from "@/services/SunService";
 import { fetchVenuesFromGooglePlaces } from "@/data/stockholmVenues";
-import { VenueCard } from "./VenueCard";
 import { ShadowLayer } from "./ShadowLayer";
 import { MapClickHandler } from "./MapClickHandler";
+import { Sun, Cloud } from "lucide-react";
 import { useEffect, useState, useCallback, useRef } from "react";
+
+// ── Popup helpers ──
+
+function fmtTime(d: Date) {
+  return d.toLocaleTimeString("sv-SE", { hour: "2-digit", minute: "2-digit" });
+}
+function dayLabel(d: Date) {
+  const today = new Date();
+  return d.getDate() === today.getDate() && d.getMonth() === today.getMonth()
+    ? "idag"
+    : "imorgon";
+}
+function sunWindowText(w: SunWindow | null | undefined): string | null {
+  if (!w) return null;
+  if (w.type === "sunny_until") return `Sol till ${fmtTime(w.end)} ${dayLabel(w.end)}`;
+  if (w.start) return `Sol ${fmtTime(w.start)}–${fmtTime(w.end)} ${dayLabel(w.start)}`;
+  return null;
+}
+function cleanAddress(addr: string): string {
+  if (!addr) return addr;
+  const parts = addr.split(",").map((s) => s.trim()).filter(Boolean);
+  if (parts.length > 1 && !/\d/.test(parts[0]) && /\d/.test(parts[1])) {
+    return parts.slice(1).join(", ");
+  }
+  return addr;
+}
+
+function VenuePopup({ venue, status, loading }: { venue: Venue; status: SunStatus | null; loading: boolean }) {
+  const s = status ?? quickSunStatus(venue.lat, venue.lng, new Date());
+  const sunny = s.isSunny;
+  const windowText = s.confidence === "high" ? sunWindowText(s.sunWindow) : null;
+
+  return (
+    <div style={{ minWidth: 220, fontFamily: "inherit" }}>
+      {/* Icon + status */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "center",
+          width: 44, height: 44, borderRadius: "50%", flexShrink: 0,
+          background: sunny ? "rgba(250,200,40,0.18)" : "rgba(140,140,160,0.15)",
+        }}>
+          {sunny
+            ? <Sun size={26} color="hsl(45,90%,42%)" strokeWidth={2.5} />
+            : <Cloud size={26} color="hsl(220,10%,52%)" strokeWidth={2} />}
+        </div>
+        <div>
+          <div style={{ fontSize: 17, fontWeight: 700, lineHeight: 1.2, color: sunny ? "hsl(38,90%,35%)" : "hsl(220,10%,35%)" }}>
+            {sunny ? "I solen ☀️" : "I skuggan"}
+          </div>
+          {/* Sun window — shown prominently when available */}
+          {windowText && (
+            <div style={{ fontSize: 13, fontWeight: 600, color: "hsl(220,15%,40%)", marginTop: 2 }}>
+              {windowText}
+            </div>
+          )}
+          {loading && !windowText && (
+            <div style={{ fontSize: 12, color: "hsl(220,10%,60%)", marginTop: 2 }}>Hämtar…</div>
+          )}
+        </div>
+      </div>
+      {/* Address */}
+      <div style={{ fontSize: 12, color: "hsl(220,10%,55%)", marginTop: 2 }}>
+        {cleanAddress(venue.address)}
+      </div>
+    </div>
+  );
+}
 
 // Fix leaflet default icon issue
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -167,18 +234,8 @@ function VenueMarker({
       icon={pinIcon}
       eventHandlers={{ popupopen: handlePopupOpen }}
     >
-      <Popup className="venue-popup" maxWidth={320} minWidth={280}>
-        {/* Always show a card — quick estimate while Step 2 is pending */}
-        <VenueCard
-          venue={{ ...venue, sunStatus: status ?? quick }}
-          compact
-        />
-        {loading && (
-          <div className="flex items-center gap-1.5 px-3 pb-2 text-xs text-muted-foreground border-t border-border pt-2 mt-[-4px]">
-            <div className="h-3 w-3 animate-spin rounded-full border-2 border-muted-foreground/40 border-t-muted-foreground shrink-0" />
-            Hämtar exakt status…
-          </div>
-        )}
+      <Popup className="venue-popup" maxWidth={280} minWidth={220}>
+        <VenuePopup venue={venue} status={status} loading={loading} />
       </Popup>
     </Marker>
   );
