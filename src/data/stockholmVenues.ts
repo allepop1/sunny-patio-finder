@@ -63,9 +63,10 @@ export async function fetchVenuesFromGooglePlaces(
       const results: any[] = r.data?.results ?? [];
       console.log(`[places] ${results.length} results returned`);
       if (results.length > 0) {
-        // Log a sample to verify coordinate shape
-        const s = results[0];
-        console.log(`[places] sample: "${s.name}" lat=${s.geometry?.location?.lat} lng=${s.geometry?.location?.lng}`);
+        console.log("[places] 5 sample vicinity/formatted_address:");
+        results.slice(0, 5).forEach((p: any) => {
+          console.log(`  "${p.name}" → vicinity="${p.vicinity}" formatted_address="${p.formatted_address ?? "(none)"}"`);
+        });
       }
       return results;
     })
@@ -101,9 +102,14 @@ export async function fetchVenuesFromGooglePlaces(
       const d = distM(row.lat, row.lng, pLat, pLng);
       if (d >= bestDist) continue;
 
-      // Require the same house number to appear in the Places vicinity string
-      const vicinity: string = p.vicinity ?? "";
-      if (houseNumber && !vicinity.includes(houseNumber)) continue;
+      // Require the same house number in vicinity OR formatted_address.
+      // Use word-boundary regex so "52" doesn't match "152" or "520".
+      if (houseNumber) {
+        const numRe = new RegExp(`(?<![\\d])${houseNumber}(?![\\d])`);
+        const vicinity: string = p.vicinity ?? "";
+        const formatted: string = p.formatted_address ?? "";
+        if (!numRe.test(vicinity) && !numRe.test(formatted)) continue;
+      }
 
       bestDist = d;
       bestPlace = p;
