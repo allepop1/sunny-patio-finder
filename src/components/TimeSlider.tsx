@@ -13,10 +13,10 @@ export function TimeSlider({ onChange, isLoading }: TimeSliderProps) {
 
   const now = useMemo(() => new Date(), []);
 
-  // Generate time labels: every hour for 6 hours
+  // Tick labels every 6 hours over 24h window
   const labels = useMemo(() => {
     const result: { minutes: number; label: string }[] = [];
-    for (let h = 0; h <= 6; h++) {
+    for (let h = 0; h <= 24; h += 6) {
       const d = new Date(now.getTime() + h * 60 * 60_000);
       result.push({
         minutes: h * 60,
@@ -71,7 +71,9 @@ export function TimeSlider({ onChange, isLoading }: TimeSliderProps) {
           )}
           {offsetMinutes > 0 && (
             <span className="text-xs text-muted-foreground ml-1">
-              +{Math.round(offsetMinutes / 60)}h
+              {offsetMinutes % 60 === 0
+                ? `+${offsetMinutes / 60}h`
+                : `+${Math.floor(offsetMinutes / 60)}h${offsetMinutes % 60}m`}
             </span>
           )}
           {isLoading && (
@@ -84,7 +86,7 @@ export function TimeSlider({ onChange, isLoading }: TimeSliderProps) {
         defaultValue={[0]}
         value={[offsetMinutes]}
         onValueChange={handleChange}
-        max={360}
+        max={1440}
         step={30}
         className="w-full"
       />
