@@ -68,7 +68,12 @@ function VenuePopup({ venue, status, loading }: { venue: Venue; status: SunStatu
           )}
         </div>
       </div>
-      {/* Address */}
+      {/* Name + address */}
+      {venue.name !== venue.address && (
+        <div style={{ fontSize: 14, fontWeight: 700, color: "hsl(220,15%,20%)", marginTop: 4 }}>
+          {venue.name}
+        </div>
+      )}
       <div style={{ fontSize: 12, color: "hsl(220,10%,55%)", marginTop: 2 }}>
         {cleanAddress(venue.address)}
       </div>
