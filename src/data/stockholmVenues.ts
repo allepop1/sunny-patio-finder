@@ -82,20 +82,33 @@ export async function fetchVenuesFromGooglePlaces(
   const rows = spatialDedup(rawRows);
   console.log(`[uteserveringar] ${rawRows.length} → ${rows.length} after spatial dedup (20m)`);
 
-  // ── 4. Match each uteservering to nearest Google Place (≤ 100 m) ──
-  const MATCH_M = 100;
+  // ── 4. Match each uteservering to a Google Place ──
+  // Rules: within 100m AND the Place's vicinity must contain the same street
+  // number as the uteservering address. Wrong-name matches are worse than no name.
   let matched = 0;
 
   const venues: Venue[] = rows.map((row) => {
+    // Extract street number from the stored address (last whitespace-delimited
+    // token that starts with a digit, e.g. "Birkagatan 14" → "14")
+    const houseNumber = row.address.split(" ").findLast((t) => /^\d/.test(t)) ?? "";
+
     let bestPlace: any = null;
-    let bestDist = MATCH_M;
+    let bestDist = 100; // metres cap
     for (const p of places) {
       const pLat = p.geometry?.location?.lat;
       const pLng = p.geometry?.location?.lng;
       if (pLat == null || pLng == null) continue;
       const d = distM(row.lat, row.lng, pLat, pLng);
-      if (d < bestDist) { bestDist = d; bestPlace = p; }
+      if (d >= bestDist) continue;
+
+      // Require the same house number to appear in the Places vicinity string
+      const vicinity: string = p.vicinity ?? "";
+      if (houseNumber && !vicinity.includes(houseNumber)) continue;
+
+      bestDist = d;
+      bestPlace = p;
     }
+
     if (bestPlace) matched++;
     return {
       id: String(row.id),
@@ -107,44 +120,7 @@ export async function fetchVenuesFromGooglePlaces(
     };
   });
 
-  console.log(`[places] matched ${matched}/${rows.length} uteserveringar with a Google Places name (nearby search)`);
-
-  // ── 5. Text-search fallback for unmatched venues (up to 15) ──
-  const unmatched = venues
-    .map((v, i) => ({ v, i }))
-    .filter(({ v }) => v.name === v.address) // name === address means no match yet
-    .slice(0, 15);
-
-  if (unmatched.length > 0) {
-    const enriched = await Promise.all(
-      unmatched.map(async ({ v, i }) => {
-        try {
-          const { data, error } = await supabase.functions.invoke("places-proxy", {
-            body: { query: `${v.address} Stockholm`, lat: v.lat, lng: v.lng, radius: 100 },
-          });
-          if (error || !data?.results?.length) return null;
-          const p = data.results[0];
-          const pLat = p.geometry?.location?.lat;
-          const pLng = p.geometry?.location?.lng;
-          if (pLat == null || pLng == null) return null;
-          if (distM(v.lat, v.lng, pLat, pLng) > 150) return null; // sanity check
-          return { i, name: p.name as string, rating: p.rating as number | undefined };
-        } catch {
-          return null;
-        }
-      })
-    );
-
-    let textMatched = 0;
-    for (const result of enriched) {
-      if (!result) continue;
-      venues[result.i] = { ...venues[result.i], name: result.name, rating: result.rating };
-      textMatched++;
-    }
-    console.log(`[places] text-search fallback: matched ${textMatched}/${unmatched.length} additional venues`);
-    console.log(`[places] total matched: ${matched + textMatched}/${rows.length}`);
-  }
-
+  console.log(`[places] matched ${matched}/${rows.length} with correct street number`);
   return venues;
 }
 
