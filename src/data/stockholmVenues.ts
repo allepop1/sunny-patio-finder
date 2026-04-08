@@ -41,7 +41,8 @@ function spatialDedup(rows: UteRow[]): UteRow[] {
 export async function fetchVenuesFromGooglePlaces(
   lat: number,
   lng: number,
-  radiusMeters: number = 1500
+  radiusMeters: number = 1500,
+  zoom: number = 14
 ): Promise<Venue[]> {
 
   // ── 1. Supabase uteserveringar (primary) ──
@@ -56,10 +57,10 @@ export async function fetchVenuesFromGooglePlaces(
     });
 
   // ── 2. Google Places nearby (name + rating enrichment) ──
-  // Cap at 500m regardless of the uteservering radius — Places returns 60
-  // results max, so a tight search keeps them concentrated around the visible
-  // area and improves the chance that any given venue appears in the list.
-  const placesRadius = Math.min(radiusMeters, 500);
+  // Places returns max 60 results regardless of radius. Smaller radius at
+  // high zoom = denser, more relevant results = better name matching.
+  const placesRadius = zoom >= 16 ? 300 : zoom >= 15 ? 600 : 1500;
+  console.log(`[places] search radius ${placesRadius}m (zoom ${zoom})`);
   const placesPromise = supabase.functions
     .invoke("places-proxy", { body: { lat, lng, radius: placesRadius } })
     .then((r) => {

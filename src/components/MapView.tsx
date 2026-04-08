@@ -159,7 +159,7 @@ function MapVenueLoader({
 
     lastFetchPos.current = { lat, lng };
     const radius = radiusForZoom(zoom);
-    const venues = await fetchVenuesFromGooglePlaces(lat, lng, radius);
+    const venues = await fetchVenuesFromGooglePlaces(lat, lng, radius, zoom);
     onVenuesLoaded(venues);
   }, [map, onVenuesLoaded]);
 
