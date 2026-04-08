@@ -56,8 +56,12 @@ export async function fetchVenuesFromGooglePlaces(
     });
 
   // ── 2. Google Places nearby (name + rating enrichment) ──
+  // Cap at 500m regardless of the uteservering radius — Places returns 60
+  // results max, so a tight search keeps them concentrated around the visible
+  // area and improves the chance that any given venue appears in the list.
+  const placesRadius = Math.min(radiusMeters, 500);
   const placesPromise = supabase.functions
-    .invoke("places-proxy", { body: { lat, lng, radius: radiusMeters } })
+    .invoke("places-proxy", { body: { lat, lng, radius: placesRadius } })
     .then((r) => {
       if (r.error) { console.warn("[places] proxy error:", r.error); return [] as any[]; }
       const results: any[] = r.data?.results ?? [];
