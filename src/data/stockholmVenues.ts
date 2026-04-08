@@ -84,17 +84,23 @@ export async function fetchVenuesFromGooglePlaces(
   console.log(`[uteserveringar] ${rawRows.length} → ${rows.length} after spatial dedup (20m)`);
 
   // ── 4. Match each uteservering to a Google Place ──
-  // Rules: within 100m AND the Place's vicinity must contain the same street
-  // number as the uteservering address. Wrong-name matches are worse than no name.
+  // Parse street name and house number from an address string.
+  // "Karlbergsvägen 52" → { street: "karlbergsvägen", num: 52 }
+  // "Karlbergsvägen 46A" → { street: "karlbergsvägen", num: 46 }
+  function parseAddr(s: string): { street: string; num: number } | null {
+    const m = s.match(/^(.+?)\s+(\d+)/);
+    if (!m) return null;
+    return { street: m[1].toLowerCase().trim(), num: parseInt(m[2], 10) };
+  }
+
   let matched = 0;
 
   const venues: Venue[] = rows.map((row) => {
-    // Extract street number from the stored address (last whitespace-delimited
-    // token that starts with a digit, e.g. "Birkagatan 14" → "14")
-    const houseNumber = row.address.split(" ").findLast((t) => /^\d/.test(t)) ?? "";
+    const rowAddr = parseAddr(row.address);
 
     let bestPlace: any = null;
-    let bestDist = 100; // metres cap
+    let bestDist = 150; // metres cap
+
     for (const p of places) {
       const pLat = p.geometry?.location?.lat;
       const pLng = p.geometry?.location?.lng;
@@ -102,13 +108,17 @@ export async function fetchVenuesFromGooglePlaces(
       const d = distM(row.lat, row.lng, pLat, pLng);
       if (d >= bestDist) continue;
 
-      // Require the same house number in vicinity OR formatted_address.
-      // Use word-boundary regex so "52" doesn't match "152" or "520".
-      if (houseNumber) {
-        const numRe = new RegExp(`(?<![\\d])${houseNumber}(?![\\d])`);
-        const vicinity: string = p.vicinity ?? "";
-        const formatted: string = p.formatted_address ?? "";
-        if (!numRe.test(vicinity) && !numRe.test(formatted)) continue;
+      // Try vicinity first, then formatted_address
+      const addrStr: string = p.vicinity ?? p.formatted_address ?? "";
+      const placeAddr = parseAddr(addrStr);
+
+      if (rowAddr && placeAddr) {
+        // Require same street name and house numbers within 4
+        if (placeAddr.street !== rowAddr.street) continue;
+        if (Math.abs(placeAddr.num - rowAddr.num) > 4) continue;
+      } else if (rowAddr) {
+        // Place has no parseable address — skip (don't risk wrong match)
+        continue;
       }
 
       bestDist = d;
@@ -126,7 +136,7 @@ export async function fetchVenuesFromGooglePlaces(
     };
   });
 
-  console.log(`[places] matched ${matched}/${rows.length} with correct street number`);
+  console.log(`[places] matched ${matched}/${rows.length} (same street ±4 house numbers)`);
   return venues;
 }
 
