@@ -48,7 +48,12 @@ serve(async (req) => {
       `&hourly=temperature_2m,cloud_cover,weather_code` +
       `&forecast_days=2&timezone=auto&timeformat=unixtime`;
 
-    const res = await fetch(url);
+    // Retry once on transient Open-Meteo failures (5xx / network error)
+    let res = await fetch(url);
+    if (!res.ok && res.status >= 500) {
+      await new Promise((r) => setTimeout(r, 1500));
+      res = await fetch(url);
+    }
     if (!res.ok) {
       const body = await res.text();
       throw new Error(`Open-Meteo failed [${res.status}]: ${body}`);
