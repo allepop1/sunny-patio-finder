@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Polygon, useMap } from "react-leaflet";
+import { useMap, Polygon } from "react-leaflet";
 import {
   fetchBuildingsFromOSM,
   getSolarPosition,
@@ -16,9 +16,9 @@ function computeShadowPolygon(
   solarAzimuthDeg: number,
   solarAltitudeDeg: number
 ): [number, number][] | null {
-  if (solarAltitudeDeg <= 2) return null;
+  if (solarAltitudeDeg <= 6) return null;
 
-  const sLen = Math.min(shadowLength(building.height, solarAltitudeDeg), 200);
+  const sLen = Math.min(shadowLength(building.height, solarAltitudeDeg), 500);
   if (sLen <= 0) return null;
 
   // Shadow direction: opposite of sun azimuth
@@ -51,7 +51,6 @@ function computeShadowPolygon(
   );
 
   // Determine polygon winding with the shoelace formula
-  // (treating lng as x-axis, lat as y-axis)
   let signedArea = 0;
   for (let i = 0; i < m; i++) {
     const j = (i + 1) % m;
@@ -59,44 +58,28 @@ function computeShadowPolygon(
   }
   const isCCW = signedArea > 0;
 
-  // Sun direction vector in (x = lng, y = lat) space
   const sunAzRad = (solarAzimuthDeg * Math.PI) / 180;
-  const sunDirX = Math.sin(sunAzRad); // east (lng) component
-  const sunDirY = Math.cos(sunAzRad); // north (lat) component
+  const sunDirX = Math.sin(sunAzRad);
+  const sunDirY = Math.cos(sunAzRad);
 
-  // For each edge determine whether it faces away from the sun (shadow side).
-  // Outward normal for CCW polygon: right-hand = (edgeLat, -edgeLng) in (x,y).
-  // Outward normal for CW polygon:  left-hand  = (-edgeLat, edgeLng) in (x,y).
   const isShadowEdge: boolean[] = [];
   for (let i = 0; i < m; i++) {
     const j = (i + 1) % m;
     const edgeLng = ring[j][1] - ring[i][1];
     const edgeLat = ring[j][0] - ring[i][0];
-
     const normalX = isCCW ? edgeLat : -edgeLat;
     const normalY = isCCW ? -edgeLng : edgeLng;
-
-    const dot = normalX * sunDirX + normalY * sunDirY;
-    isShadowEdge.push(dot < 0);
+    isShadowEdge.push(normalX * sunDirX + normalY * sunDirY < 0);
   }
 
-  // Walk around the polygon and build the shadow outline via silhouette
-  // traversal:
-  //   – Sun-facing vertex  → use original position (building wall)
-  //   – Shadow-facing vertex → use projected position (shadow tip)
-  //   – At each sun↔shadow transition include BOTH to close the side walls
   const poly: [number, number][] = [];
-
   for (let i = 0; i < m; i++) {
     const prevShadow = isShadowEdge[(i - 1 + m) % m];
     const currShadow = isShadowEdge[i];
-
     if (!prevShadow && currShadow) {
-      // Entering shadow side: original vertex then its projection
       poly.push(ring[i]);
       poly.push(projected[i]);
     } else if (prevShadow && !currShadow) {
-      // Leaving shadow side: projection then original vertex
       poly.push(projected[i]);
       poly.push(ring[i]);
     } else if (currShadow) {
@@ -111,6 +94,21 @@ function computeShadowPolygon(
 
 const SHADOW_MIN_ZOOM = 15;
 
+/**
+ * Renders all building shadows as a single react-leaflet Polygon so that
+ * overlapping shadows from multiple buildings always show the same flat colour.
+ *
+ * All shadow polygon rings are passed as the `positions` array of ONE Polygon
+ * component, which Leaflet renders as a single SVG <path> element.  Because
+ * there is only one element, fillOpacity is applied exactly once — areas
+ * covered by multiple building shadows are not darker than areas covered by one.
+ *
+ * fillRule="nonzero" ensures overlapping rings are all filled (evenodd would
+ * punch transparent holes through areas where two shadow polygons intersect).
+ *
+ * The Polygon lives in Leaflet's overlayPane (z-index 400), above tiles but
+ * below markers — exactly where building shadows should appear.
+ */
 export function ShadowLayer({ date }: ShadowLayerProps) {
   const map = useMap();
   const [shadows, setShadows] = useState<[number, number][][]>([]);
@@ -121,17 +119,38 @@ export function ShadowLayer({ date }: ShadowLayerProps) {
 
     async function loadShadows() {
       const center = map.getCenter();
-      const zoom = map.getZoom();
-      const solar = getSolarPosition(date, center.lat, center.lng);
+      const zoom   = map.getZoom();
+      const solar  = getSolarPosition(date, center.lat, center.lng);
 
-      // Only render shadows at close zoom levels — avoids unnecessary Overpass
-      // requests and keeps the visual useful (wide-zoom shadows are meaningless).
-      if (zoom < SHADOW_MIN_ZOOM || solar.altitude <= 2) {
+      if (zoom < SHADOW_MIN_ZOOM || solar.altitude <= 6) {
+        console.log(
+          `[ShadowLayer] suppressed: zoom=${zoom} (min=${SHADOW_MIN_ZOOM})` +
+          ` alt=${solar.altitude.toFixed(1)}°`
+        );
         setShadows([]);
         return;
       }
 
-      const buildings = await fetchBuildingsFromOSM(center.lat, center.lng, 500);
+      // Compute a fetch radius that covers the entire visible viewport plus a
+      // shadow-buffer so buildings just outside the frame can still cast shadows
+      // into it.  The Supabase RPC takes a circle, so we use the haversine
+      // distance from center to the NE corner (the viewport's diagonal half-length).
+      const ne = map.getBounds().getNorthEast();
+      const R = 6371000;
+      const toRad = (d: number) => (d * Math.PI) / 180;
+      const dLat = toRad(ne.lat - center.lat);
+      const dLng = toRad(ne.lng - center.lng);
+      const aHav =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(center.lat)) * Math.cos(toRad(ne.lat)) * Math.sin(dLng / 2) ** 2;
+      const viewportRadius = R * 2 * Math.atan2(Math.sqrt(aHav), Math.sqrt(1 - aHav));
+
+      // Buildings up to ~500 m outside the viewport can cast shadows into it at
+      // low solar altitudes.  Cap total radius at 2 000 m to keep query fast.
+      const shadowBuffer = Math.min(500, shadowLength(30, solar.altitude));
+      const fetchRadius = Math.min(2000, Math.round(viewportRadius + shadowBuffer));
+
+      const buildings = await fetchBuildingsFromOSM(center.lat, center.lng, fetchRadius);
       if (cancelled) return;
 
       const polys: [number, number][][] = [];
@@ -139,6 +158,11 @@ export function ShadowLayer({ date }: ShadowLayerProps) {
         const poly = computeShadowPolygon(b, solar.azimuth, solar.altitude);
         if (poly) polys.push(poly);
       }
+
+      console.log(
+        `[ShadowLayer] ${polys.length}/${buildings.length} shadow polys` +
+        ` | zoom=${zoom} r=${fetchRadius}m alt=${solar.altitude.toFixed(1)}° az=${solar.azimuth.toFixed(1)}°`
+      );
 
       setShadows(polys);
     }
@@ -160,20 +184,20 @@ export function ShadowLayer({ date }: ShadowLayerProps) {
     };
   }, [map, date]);
 
+  if (shadows.length === 0) return null;
+
+  // All shadow rings in one Polygon → one SVG <path> element → one fillOpacity.
+  // fillRule="nonzero": overlapping shadow areas stay filled (not punched out).
   return (
-    <>
-      {shadows.map((positions, i) => (
-        <Polygon
-          key={i}
-          positions={positions}
-          pathOptions={{
-            color: "hsl(220, 10%, 30%)",
-            fillColor: "hsl(220, 10%, 30%)",
-            fillOpacity: 0.25,
-            weight: 0,
-          }}
-        />
-      ))}
-    </>
+    <Polygon
+      positions={shadows}
+      pathOptions={{
+        fillColor: "rgb(100, 120, 160)",
+        fillOpacity: 0.25,
+        stroke: false,
+        fillRule: "nonzero",
+      }}
+      interactive={false}
+    />
   );
 }

@@ -6,8 +6,9 @@ import { Venue, SunStatus, SunWindow, quickSunStatus } from "@/services/SunServi
 import { fetchVenuesFromGooglePlaces } from "@/data/stockholmVenues";
 import { ShadowLayer } from "./ShadowLayer";
 import { MapClickHandler } from "./MapClickHandler";
+import { UserLocationMarker } from "./UserLocationMarker";
 import { Sun, Cloud } from "lucide-react";
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, memo } from "react";
 
 // ── Popup helpers ──
 
@@ -35,10 +36,43 @@ function cleanAddress(addr: string): string {
   return addr;
 }
 
+const VENUE_TYPE_LABEL: Record<string, string> = {
+  restaurant: "Restaurang",
+  bar: "Bar / pub",
+  cafe: "Café",
+  bakery: "Bageri / konditori",
+  default: "Uteservering",
+};
+
 function VenuePopup({ venue, status, loading }: { venue: Venue; status: SunStatus | null; loading: boolean }) {
   const s = status ?? quickSunStatus(venue.lat, venue.lng, new Date());
   const sunny = s.isSunny;
+  const partial = s.isPartial ?? false;
   const windowText = s.confidence === "high" ? sunWindowText(s.sunWindow) : null;
+  const emoji = getVenueEmoji(venue.venueType);
+  const typeLabel = VENUE_TYPE_LABEL[venue.venueType ?? "default"] ?? VENUE_TYPE_LABEL.default;
+
+  // Status colour and text
+  const statusColor = partial
+    ? "#f97316"
+    : sunny
+    ? "hsl(38,90%,35%)"
+    : "hsl(220,10%,35%)";
+  const statusText = partial
+    ? "Sol på en sida ⛅"
+    : sunny
+    ? "I solen ☀️"
+    : "I skuggan";
+  const iconBg = partial
+    ? "rgba(249,115,22,0.15)"
+    : sunny
+    ? "rgba(250,200,40,0.18)"
+    : "rgba(140,140,160,0.15)";
+
+  // For corner venues show "Addr1 / Addr2"
+  const addressLine = venue.allAddresses && venue.allAddresses.length > 1
+    ? venue.allAddresses.map(cleanAddress).join(" / ")
+    : cleanAddress(venue.address);
 
   return (
     <div style={{ minWidth: 220, fontFamily: "inherit" }}>
@@ -47,15 +81,15 @@ function VenuePopup({ venue, status, loading }: { venue: Venue; status: SunStatu
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "center",
           width: 44, height: 44, borderRadius: "50%", flexShrink: 0,
-          background: sunny ? "rgba(250,200,40,0.18)" : "rgba(140,140,160,0.15)",
+          background: iconBg,
         }}>
-          {sunny
-            ? <Sun size={26} color="hsl(45,90%,42%)" strokeWidth={2.5} />
+          {sunny || partial
+            ? <Sun size={26} color={partial ? "#f97316" : "hsl(45,90%,42%)"} strokeWidth={2.5} />
             : <Cloud size={26} color="hsl(220,10%,52%)" strokeWidth={2} />}
         </div>
         <div>
-          <div style={{ fontSize: 17, fontWeight: 700, lineHeight: 1.2, color: sunny ? "hsl(38,90%,35%)" : "hsl(220,10%,35%)" }}>
-            {sunny ? "I solen ☀️" : "I skuggan"}
+          <div style={{ fontSize: 17, fontWeight: 700, lineHeight: 1.2, color: statusColor }}>
+            {statusText}
           </div>
           {/* Sun window — shown prominently when available */}
           {windowText && (
@@ -75,34 +109,88 @@ function VenuePopup({ venue, status, loading }: { venue: Venue; status: SunStatu
         </div>
       )}
       <div style={{ fontSize: 12, color: "hsl(220,10%,55%)", marginTop: 2 }}>
-        {cleanAddress(venue.address)}
+        {addressLine}
+      </div>
+      {/* Venue type */}
+      <div style={{ fontSize: 11, color: "hsl(220,10%,65%)", marginTop: 4 }}>
+        {emoji} {typeLabel}
       </div>
     </div>
   );
 }
 
 // Fix leaflet default icon issue
-delete (L.Icon.Default.prototype as any)._getIconUrl;
+delete (L.Icon.Default.prototype as unknown as Record<string, unknown>)._getIconUrl;
 
-function makeDot(color: string) {
+const VENUE_EMOJI: Record<string, string> = {
+  restaurant: "🍽️",
+  bar: "🍺",
+  cafe: "☕",
+  bakery: "🥐",
+  default: "🌿",
+};
+
+function makeEmojiPin(emoji: string, sunny: boolean) {
+  const bg = sunny ? "hsl(45,90%,52%)" : "hsl(220,10%,55%)";
   return L.divIcon({
     className: "",
     html: `<div style="
-      width:10px;height:10px;border-radius:50%;
-      background:${color};
+      display:flex;align-items:center;justify-content:center;
+      width:24px;height:24px;border-radius:50%;
+      background:${bg};
       border:2px solid white;
       box-shadow:0 1px 4px rgba(0,0,0,0.35);
-    "></div>`,
-    iconSize: [10, 10],
-    iconAnchor: [5, 5],
-    popupAnchor: [0, -10],
+      font-size:12px;line-height:1;
+    ">${emoji}</div>`,
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
+    popupAnchor: [0, -14],
   });
 }
 
-/** Yellow dot — sun likely above horizon with no known obstructions. */
-const sunnyDotIcon = makeDot("hsl(45,90%,52%)");
-/** Grey dot — sun below horizon or angle too low. */
-const shadyDotIcon = makeDot("hsl(220,10%,55%)");
+function getVenueEmoji(venueType?: string): string {
+  return VENUE_EMOJI[venueType ?? "default"] ?? VENUE_EMOJI.default;
+}
+
+/** Sunny emoji pin */
+function makeSunnyPin(venueType?: string) { return makeEmojiPin(getVenueEmoji(venueType), true); }
+/** Shady emoji pin */
+function makeShadyPin(venueType?: string) { return makeEmojiPin(getVenueEmoji(venueType), false); }
+/** Partial-sun pin — orange background, same emoji */
+function makePartialPin(venueType?: string) {
+  const emoji = getVenueEmoji(venueType);
+  return L.divIcon({
+    className: "",
+    html: `<div style="
+      display:flex;align-items:center;justify-content:center;
+      width:24px;height:24px;border-radius:50%;
+      background:#f97316;
+      border:2px solid white;
+      box-shadow:0 1px 4px rgba(0,0,0,0.35);
+      font-size:12px;line-height:1;
+    ">${emoji}</div>`,
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
+    popupAnchor: [0, -14],
+  });
+}
+/** Night pin — slate-400 background, moon emoji regardless of venue type */
+function makeNightPin() {
+  return L.divIcon({
+    className: "",
+    html: `<div style="
+      display:flex;align-items:center;justify-content:center;
+      width:24px;height:24px;border-radius:50%;
+      background:#94a3b8;
+      border:2px solid white;
+      box-shadow:0 1px 4px rgba(0,0,0,0.35);
+      font-size:12px;line-height:1;
+    ">🌙</div>`,
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
+    popupAnchor: [0, -14],
+  });
+}
 
 /** Search radius in metres based on Leaflet zoom level. */
 function radiusForZoom(zoom: number): number {
@@ -159,8 +247,13 @@ function MapVenueLoader({
 
     lastFetchPos.current = { lat, lng };
     const radius = radiusForZoom(zoom);
-    const venues = await fetchVenuesFromGooglePlaces(lat, lng, radius, zoom);
-    onVenuesLoaded(venues);
+    try {
+      const venues = await fetchVenuesFromGooglePlaces(lat, lng, radius, zoom);
+      onVenuesLoaded(venues);
+    } catch (error) {
+      console.error("[MapVenueLoader] Failed to load venues:", error);
+      onVenuesLoaded([]);
+    }
   }, [map, onVenuesLoaded]);
 
   useEffect(() => {
@@ -194,64 +287,120 @@ function MapVenueLoader({
  * Step 2 (on popup open): fetches real weather + OSM buildings and replaces
  *   the popup content with accurate status. Result is cached so re-opening
  *   the popup is instant.
+ *
+ * Wrapped in React.memo with a custom comparator so the component only
+ * re-renders when its own props change — not when sibling venues are added
+ * or removed (which would otherwise close the open popup).
  */
-function VenueMarker({
-  venue,
-  selectedDate,
-  getVenueStatus,
-  onSelect,
-}: {
-  venue: Venue;
-  selectedDate: Date;
-  getVenueStatus: (venue: Venue) => Promise<SunStatus>;
-  onSelect?: (venue: Venue) => void;
-}) {
-  const [status, setStatus] = useState<SunStatus | null>(null);
-  const [loading, setLoading] = useState(false);
-  const markerRef = useRef<LeafletMarker>(null);
+const VenueMarker = memo(
+  function VenueMarker({
+    venue,
+    selectedDate,
+    getVenueStatus,
+    onSelect,
+    onMarkerMount,
+    isNight = false,
+    selectedVenueId = null,
+  }: {
+    venue: Venue;
+    selectedDate: Date;
+    getVenueStatus: (venue: Venue) => Promise<SunStatus>;
+    onSelect?: (venue: Venue) => void;
+    onMarkerMount?: (venueId: string, marker: LeafletMarker) => void;
+    isNight?: boolean;
+    selectedVenueId?: string | null;
+  }) {
+    const [status, setStatus] = useState<SunStatus | null>(null);
+    const [loading, setLoading] = useState(false);
+    const markerRef = useRef<LeafletMarker>(null);
 
-  const quick = quickSunStatus(venue.lat, venue.lng, selectedDate);
-  const isSunny = (status ?? quick).isSunny;
+    const quick = quickSunStatus(venue.lat, venue.lng, selectedDate);
+    // When it's night, no venue can be "in sun" — override to false.
+    const currentStatus = status ?? quick;
+    const isSunny = isNight ? false : currentStatus.isSunny;
+    const isPartial = !isNight && (currentStatus.isPartial ?? false);
 
-  // Imperatively update the Leaflet marker icon whenever sunny-state changes.
-  // react-leaflet's prop reconciliation skips setIcon while a popup is open,
-  // so we bypass it and call the Leaflet API directly.
-  useEffect(() => {
-    markerRef.current?.setIcon(isSunny ? sunnyDotIcon : shadyDotIcon);
-  }, [isSunny]);
 
-  // When the selected time changes, invalidate the cached status.
-  useEffect(() => {
-    setStatus(null);
-  }, [selectedDate]);
+    // Register this Leaflet marker in MapView's registry so the parent can
+    // programmatically open its popup (e.g. after a search).
+    useEffect(() => {
+      if (markerRef.current) onMarkerMount?.(venue.id, markerRef.current);
+    // onMarkerMount is a stable callback — intentionally omitted from deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [venue.id]);
 
-  const handlePopupOpen = useCallback(async () => {
-    onSelect?.(venue);
-    if (status) return;
-    setLoading(true);
-    try {
-      const s = await getVenueStatus(venue);
-      setStatus(s);
-    } catch {
-      // Leave status null — popup keeps showing quick estimate
-    } finally {
-      setLoading(false);
-    }
-  }, [venue, status, getVenueStatus, onSelect]);
+    // B) Re-open guard: if this venue is the selected one and the popup has
+    // been closed by a re-render, reopen it.  Runs after every render of this
+    // component so it catches any accidental close immediately.
+    useEffect(() => {
+      if (venue.id !== selectedVenueId) return;
+      const m = markerRef.current;
+      if (!m) return;
+      if (!m.isPopupOpen()) m.openPopup();
+    });
 
-  return (
-    <Marker
-      ref={markerRef}
-      position={[venue.lat, venue.lng]}
-      icon={isSunny ? sunnyDotIcon : shadyDotIcon}
-      eventHandlers={{ popupopen: handlePopupOpen }}
-    >
-      <Popup className="venue-popup" maxWidth={280} minWidth={220}>
-        <VenuePopup venue={venue} status={status} loading={loading} />
-      </Popup>
-    </Marker>
-  );
-}
+    // Imperatively update the Leaflet marker icon whenever sunny-state or night-mode changes.
+    // react-leaflet's prop reconciliation skips setIcon while a popup is open,
+    // so we bypass it and call the Leaflet API directly.
+    useEffect(() => {
+      const icon = isNight
+        ? makeNightPin()
+        : isPartial
+        ? makePartialPin(venue.venueType)
+        : isSunny
+        ? makeSunnyPin(venue.venueType)
+        : makeShadyPin(venue.venueType);
+      markerRef.current?.setIcon(icon);
+    }, [isNight, isSunny, isPartial, venue.venueType]);
+
+    // When the selected time changes, invalidate the cached status.
+    useEffect(() => {
+      setStatus(null);
+    }, [selectedDate]);
+
+    const handlePopupOpen = useCallback(async () => {
+      onSelect?.(venue);
+      if (status) return;
+      setLoading(true);
+      try {
+        const s = await getVenueStatus(venue);
+        setStatus(s);
+      } catch {
+        // Leave status null — popup keeps showing quick estimate
+      } finally {
+        setLoading(false);
+      }
+    }, [venue, status, getVenueStatus, onSelect]);
+
+    const currentIcon = isNight
+      ? makeNightPin()
+      : isPartial
+      ? makePartialPin(venue.venueType)
+      : isSunny
+      ? makeSunnyPin(venue.venueType)
+      : makeShadyPin(venue.venueType);
+
+    return (
+      <Marker
+        ref={markerRef}
+        position={[venue.lat, venue.lng]}
+        icon={currentIcon}
+        eventHandlers={{ popupopen: handlePopupOpen }}
+      >
+        <Popup className="venue-popup" maxWidth={280} minWidth={220}>
+          <VenuePopup venue={venue} status={status} loading={loading} />
+        </Popup>
+      </Marker>
+    );
+  },
+  // A) Custom comparator: only re-render when props that visually matter change.
+  // Stable callbacks (getVenueStatus, onSelect, onMarkerMount) are excluded.
+  (prev, next) =>
+    prev.venue.id === next.venue.id &&
+    prev.selectedDate.getTime() === next.selectedDate.getTime() &&
+    prev.isNight === next.isNight &&
+    prev.selectedVenueId === next.selectedVenueId,
+);
 
 interface MapViewProps {
   venues: Venue[];
@@ -261,6 +410,9 @@ interface MapViewProps {
   selectedVenue?: Venue | null;
   onVenuesLoaded?: (venues: Venue[]) => void;
   getVenueStatus?: (venue: Venue) => Promise<SunStatus>;
+  isNight?: boolean;
+  userLocation?: { lat: number; lng: number; accuracy?: number } | null;
+  selectedVenueId?: string | null;
 }
 
 function MapUpdater({ center }: { center: [number, number] }) {
@@ -279,32 +431,67 @@ export function MapView({
   selectedVenue,
   onVenuesLoaded,
   getVenueStatus,
+  isNight = false,
+  userLocation = null,
+  selectedVenueId = null,
 }: MapViewProps) {
+  // Registry: venue.id → Leaflet marker instance, rebuilt on each new venue set.
+  const markerRegistry = useRef<Map<string, LeafletMarker>>(new Map());
+
+  const handleMarkerMount = useCallback((venueId: string, marker: LeafletMarker) => {
+    markerRegistry.current.set(venueId, marker);
+  }, []);
+
+  // Open the popup for selectedVenueId.
+  // Listens to BOTH selectedVenueId AND venues so it retries after new
+  // venues load.  Children's register-effects always run before this parent
+  // effect, so the registry is populated by the time this fires.
+  useEffect(() => {
+    if (!selectedVenueId) return;
+    const marker = markerRegistry.current.get(selectedVenueId);
+    if (marker) {
+      console.log(`[popup] opening for venueId=${selectedVenueId}`);
+      marker.openPopup();
+    }
+  }, [selectedVenueId, venues]);
+
   return (
-    <MapContainer
-      center={center}
-      zoom={14}
-      scrollWheelZoom={true}
-      className="h-full w-full rounded-lg"
-      zoomControl={false}
-    >
-      <MapUpdater center={center} />
-      {onVenuesLoaded && <MapVenueLoader onVenuesLoaded={onVenuesLoaded} />}
-      <TileLayer
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
-        url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-      />
-      <ShadowLayer date={selectedDate} />
-      <MapClickHandler date={selectedDate} />
-      {venues.map((venue) => (
-        <VenueMarker
-          key={venue.id}
-          venue={venue}
-          selectedDate={selectedDate}
-          getVenueStatus={getVenueStatus!}
-          onSelect={onVenueSelect}
+    <div className="relative h-full w-full">
+      <MapContainer
+        center={center}
+        zoom={14}
+        scrollWheelZoom={true}
+        className="h-full w-full rounded-lg"
+        zoomControl={false}
+      >
+        <MapUpdater center={center} />
+        {onVenuesLoaded && <MapVenueLoader onVenuesLoaded={onVenuesLoaded} />}
+        <TileLayer
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
+          url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
         />
-      ))}
-    </MapContainer>
+        <ShadowLayer date={selectedDate} />
+        <MapClickHandler date={selectedDate} />
+        <UserLocationMarker position={userLocation} accuracy={userLocation?.accuracy} />
+        {venues.map((venue) => (
+          <VenueMarker
+            key={venue.id}
+            venue={venue}
+            selectedDate={selectedDate}
+            getVenueStatus={getVenueStatus!}
+            onSelect={onVenueSelect}
+            onMarkerMount={handleMarkerMount}
+            isNight={isNight}
+            selectedVenueId={selectedVenueId}
+          />
+        ))}
+      </MapContainer>
+      {isNight && (
+        <div
+          className="absolute inset-0 rounded-lg bg-slate-900/30 pointer-events-none"
+          aria-hidden="true"
+        />
+      )}
+    </div>
   );
 }

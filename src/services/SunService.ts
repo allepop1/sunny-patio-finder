@@ -1,4 +1,11 @@
 import SunCalc from "suncalc";
+
+interface OverpassNode { lat: number; lon: number }
+interface OverpassElement {
+  geometry?: OverpassNode[];
+  tags?: Record<string, string>;
+}
+interface OverpassResponse { elements: OverpassElement[] }
 import { fetchWeather, type WeatherData, type ForecastItem } from "./WeatherService";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -24,6 +31,7 @@ export interface SunWindow {
 
 export interface SunStatus {
   isSunny: boolean;
+  isPartial?: boolean; // true when at least one terrace side is sunny and at least one is not
   buildingShadow: boolean;
   cloudCover: number; // 0-100
   solarAltitude: number;
@@ -49,6 +57,11 @@ export interface Venue {
   rating?: number;
   openingHours?: string;
   sunStatus?: SunStatus;
+  venueType?: string; // "restaurant" | "bar" | "cafe" | "bakery" | "default"
+  /** For corner venues: all terrace coordinates (first entry = primary / lat+lng above). */
+  points?: Array<{ lat: number; lng: number }>;
+  /** For corner venues: all permit addresses. */
+  allAddresses?: string[];
 }
 
 // ── Solar Position (pure math via suncalc) ──
@@ -65,6 +78,66 @@ export function getSolarPosition(
   return { azimuth: azimuthDeg, altitude: altitudeDeg };
 }
 
+// ── Night Info ──
+
+export interface NightInfo {
+  isNight: boolean;
+  sunrise: Date;
+  sunset: Date;
+  nextEvent: "sunrise" | "sunset";
+  nextEventTime: Date;
+  minutesUntilNextEvent: number;
+}
+
+/**
+ * Returns night/day state and next sun event for a given time and location.
+ *
+ * "sunrise" and "sunset" are the NEXT occurrence of each after `date`:
+ *   - Before sunrise  → sunrise=today,    sunset=today
+ *   - Daytime         → sunrise=tomorrow, sunset=today
+ *   - After sunset    → sunrise=tomorrow, sunset=tomorrow
+ *
+ * Edge case (polar night / midnight sun): SunCalc returns Invalid Date when
+ * there is no sunrise or sunset.  In that case we fall back gracefully so the
+ * UI never shows NaN times.
+ */
+export function getNightInfo(date: Date, lat: number, lng: number): NightInfo {
+  const solar = getSolarPosition(date, lat, lng);
+  const isNight = solar.altitude < 0;
+
+  const todayTimes = SunCalc.getTimes(date, lat, lng);
+  const tomorrowDate = new Date(date.getTime() + 24 * 60 * 60 * 1000);
+  const tomorrowTimes = SunCalc.getTimes(tomorrowDate, lat, lng);
+
+  const isValid = (d: Date) => d instanceof Date && !isNaN(d.getTime());
+
+  // Next sunrise: today's if still in the future, otherwise tomorrow's
+  const sunrise =
+    isValid(todayTimes.sunrise) && date < todayTimes.sunrise
+      ? todayTimes.sunrise
+      : isValid(tomorrowTimes.sunrise)
+      ? tomorrowTimes.sunrise
+      : new Date(date.getTime() + 12 * 60 * 60 * 1000); // fallback +12 h
+
+  // Next sunset: today's if still in the future, otherwise tomorrow's
+  const sunset =
+    isValid(todayTimes.sunset) && date < todayTimes.sunset
+      ? todayTimes.sunset
+      : isValid(tomorrowTimes.sunset)
+      ? tomorrowTimes.sunset
+      : new Date(date.getTime() + 12 * 60 * 60 * 1000); // fallback +12 h
+
+  // Whichever comes first is the next event
+  const nextEvent: "sunrise" | "sunset" = sunrise <= sunset ? "sunrise" : "sunset";
+  const nextEventTime = nextEvent === "sunrise" ? sunrise : sunset;
+  const minutesUntilNextEvent = Math.max(
+    0,
+    Math.round((nextEventTime.getTime() - date.getTime()) / 60_000)
+  );
+
+  return { isNight, sunrise, sunset, nextEvent, nextEventTime, minutesUntilNextEvent };
+}
+
 // ── Shadow Calculation ──
 
 /**
@@ -78,9 +151,34 @@ export function shadowLength(buildingHeight: number, solarAltitudeDeg: number): 
 }
 
 /**
+ * Ray-casting point-in-polygon test.
+ * Returns true if (lat, lng) is inside the given polygon.
+ */
+function pointInPolygon(lat: number, lng: number, polygon: [number, number][]): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [latI, lngI] = polygon[i];
+    const [latJ, lngJ] = polygon[j];
+    const intersect =
+      (lngI > lng) !== (lngJ > lng) &&
+      lat < ((latJ - latI) * (lng - lngI)) / (lngJ - lngI) + latI;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+/**
  * Check if a point is in the shadow of a building.
- * Uses simplified ray casting: projects shadow from building centroid
- * in the direction opposite to the sun's azimuth.
+ *
+ * Uses shadow-polygon projection: the building's ground footprint is
+ * translated by the shadow vector (length = building height / tan(altitude),
+ * direction = opposite of solar azimuth). The point is in shadow if and only
+ * if it falls inside this translated polygon.
+ *
+ * This replaces the earlier centroid + cone approach, which over-fired on
+ * large L-shaped buildings (e.g. a 934 sqm block with a 42 m perpendicular
+ * span caused false shadow hits on venues 17 m to the side of the shadow
+ * axis — venues that the building cannot physically shadow).
  */
 export function isPointInBuildingShadow(
   pointLat: number,
@@ -91,75 +189,144 @@ export function isPointInBuildingShadow(
 ): boolean {
   if (solarAltitudeDeg <= 0) return true; // nighttime = shadow
 
-  const sLen = Math.min(shadowLength(building.height, solarAltitudeDeg), 200);
+  // A point inside the building's own footprint cannot be in its shadow —
+  // it is part of the building itself (e.g. a venue inside a courtyard whose
+  // surrounding block is one OSM polygon). Without this guard the hybrid
+  // shadow polygon's sun-facing edges, kept at original position, form a
+  // "cage" around the point and produce a false-positive shadow hit.
+  if (pointInPolygon(pointLat, pointLng, building.polygon)) return false;
+
+  const sLen = Math.min(shadowLength(building.height, solarAltitudeDeg), 500);
   if (sLen <= 0) return false;
 
-  // Building centroid
-  const centroidLat =
-    building.polygon.reduce((s, p) => s + p[0], 0) / building.polygon.length;
-  const centroidLng =
-    building.polygon.reduce((s, p) => s + p[1], 0) / building.polygon.length;
-
-  // Shadow direction: opposite of sun azimuth
+  // Shadow direction: opposite of solar azimuth
   const shadowAzimuthRad = ((solarAzimuthDeg + 180) % 360) * (Math.PI / 180);
 
-  // Shadow tip position (approximate meters -> degrees)
-  const metersPerDegreeLat = 111320;
-  const metersPerDegreeLng = 111320 * Math.cos((centroidLat * Math.PI) / 180);
+  // Strip duplicate closing vertex that OSM polygons often include
+  let ring = building.polygon;
+  const raw = ring.length;
+  if (
+    raw > 1 &&
+    ring[0][0] === ring[raw - 1][0] &&
+    ring[0][1] === ring[raw - 1][1]
+  ) {
+    ring = ring.slice(0, raw - 1);
+  }
+  const m = ring.length;
+  if (m < 3) return false;
 
-  const shadowTipLat =
-    centroidLat + (sLen * Math.cos(shadowAzimuthRad)) / metersPerDegreeLat;
-  const shadowTipLng =
-    centroidLng + (sLen * Math.sin(shadowAzimuthRad)) / metersPerDegreeLng;
+  // Use the centroid's latitude for the lng→metre conversion
+  const centroidLat = ring.reduce((s, p) => s + p[0], 0) / m;
+  const mPerLat = 111320;
+  const mPerLng = 111320 * Math.cos((centroidLat * Math.PI) / 180);
 
-  // Check if point is within the shadow "cone"
-  // Simplified: check if point is within a rectangle from building to shadow tip
-  // with some width tolerance based on building footprint size
-  const buildingRadius = estimateBuildingRadius(building);
-  const toleranceMeters = buildingRadius + 5; // 5m margin
+  const dLat = (sLen * Math.cos(shadowAzimuthRad)) / mPerLat;
+  const dLng = (sLen * Math.sin(shadowAzimuthRad)) / mPerLng;
 
-  // Project point onto shadow line
-  const dx = pointLng - centroidLng;
-  const dy = pointLat - centroidLat;
+  // Shadow-tip polygon: each vertex projected by the shadow vector
+  const projected: [number, number][] = ring.map(
+    ([lat, lng]) => [lat + dLat, lng + dLng]
+  );
 
-  const shadowDx = shadowTipLng - centroidLng;
-  const shadowDy = shadowTipLat - centroidLat;
+  // Determine polygon winding (shoelace formula on [lng, lat])
+  let signedArea = 0;
+  for (let i = 0; i < m; i++) {
+    const j = (i + 1) % m;
+    signedArea += ring[i][1] * ring[j][0] - ring[j][1] * ring[i][0];
+  }
+  const isCCW = signedArea > 0;
 
-  const shadowLen2 = shadowDx * shadowDx + shadowDy * shadowDy;
-  if (shadowLen2 === 0) return false;
+  // Solar direction unit vector (east = X, north = Y)
+  const sunAzRad = (solarAzimuthDeg * Math.PI) / 180;
+  const sunDirX = Math.sin(sunAzRad);
+  const sunDirY = Math.cos(sunAzRad);
 
-  // t = projection scalar
-  const t = (dx * shadowDx + dy * shadowDy) / shadowLen2;
-  if (t < -0.1 || t > 1.1) return false; // point not along shadow
+  // For each edge: is it a shadow edge (outward normal faces away from sun)?
+  const isShadowEdge: boolean[] = [];
+  for (let i = 0; i < m; i++) {
+    const j = (i + 1) % m;
+    const edgeLng = ring[j][1] - ring[i][1];
+    const edgeLat = ring[j][0] - ring[i][0];
+    const normalX = isCCW ? edgeLat : -edgeLat;
+    const normalY = isCCW ? -edgeLng : edgeLng;
+    isShadowEdge.push(normalX * sunDirX + normalY * sunDirY < 0);
+  }
 
-  // Perpendicular distance
-  const projX = centroidLng + t * shadowDx;
-  const projY = centroidLat + t * shadowDy;
+  // Build the full shadow polygon (original footprint + connecting sides +
+  // shadow-tip projection) using the same silhouette algorithm as ShadowLayer.tsx.
+  // This correctly covers the corridor shadow between the building and its tip,
+  // catching venues that are closer than sLen to the building — which the old
+  // "translate-then-PiP" approach missed entirely.
+  const poly: [number, number][] = [];
+  for (let i = 0; i < m; i++) {
+    const prevShadow = isShadowEdge[(i - 1 + m) % m];
+    const currShadow = isShadowEdge[i];
+    if (!prevShadow && currShadow) {
+      poly.push(ring[i]);
+      poly.push(projected[i]);
+    } else if (prevShadow && !currShadow) {
+      poly.push(projected[i]);
+      poly.push(ring[i]);
+    } else if (currShadow) {
+      poly.push(projected[i]);
+    } else {
+      poly.push(ring[i]);
+    }
+  }
 
-  const perpDx = (pointLng - projX) * metersPerDegreeLng;
-  const perpDy = (pointLat - projY) * metersPerDegreeLat;
-  const perpDist = Math.sqrt(perpDx * perpDx + perpDy * perpDy);
+  if (poly.length < 3) return false;
 
-  return perpDist < toleranceMeters;
+  // Point-in-polygon (ray-casting) on the full shadow polygon
+  let inside = false;
+  let j = poly.length - 1;
+  for (let i = 0; i < poly.length; i++) {
+    const xi = poly[i][0], yi = poly[i][1];
+    const xj = poly[j][0], yj = poly[j][1];
+    if ((yi > pointLng) !== (yj > pointLng) &&
+        pointLat < ((xj - xi) * (pointLng - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+    j = i;
+  }
+  return inside;
 }
 
-function estimateBuildingRadius(building: Building): number {
-  const centroidLat =
-    building.polygon.reduce((s, p) => s + p[0], 0) / building.polygon.length;
-  const centroidLng =
-    building.polygon.reduce((s, p) => s + p[1], 0) / building.polygon.length;
+// ── Building polygon area helper ──
 
-  const metersPerDegreeLat = 111320;
-  const metersPerDegreeLng = 111320 * Math.cos((centroidLat * Math.PI) / 180);
-
-  let maxDist = 0;
-  for (const [lat, lng] of building.polygon) {
-    const dLat = (lat - centroidLat) * metersPerDegreeLat;
-    const dLng = (lng - centroidLng) * metersPerDegreeLng;
-    const dist = Math.sqrt(dLat * dLat + dLng * dLng);
-    if (dist > maxDist) maxDist = dist;
+/**
+ * Returns the approximate footprint area of a building polygon in square metres.
+ * Uses the shoelace formula with lat/lng converted to a local Cartesian frame.
+ */
+function polygonAreaSqm(polygon: [number, number][]): number {
+  const n = polygon.length;
+  if (n < 3) return 0;
+  const centLat = polygon.reduce((s, p) => s + p[0], 0) / n;
+  const mPerLat = 111320;
+  const mPerLng = 111320 * Math.cos((centLat * Math.PI) / 180);
+  let area = 0;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    area +=
+      polygon[i][1] * mPerLng * polygon[j][0] * mPerLat -
+      polygon[j][1] * mPerLng * polygon[i][0] * mPerLat;
   }
-  return maxDist;
+  return Math.abs(area) / 2;
+}
+
+/**
+ * Returns true for buildings that are likely misclassified open areas (parks,
+ * squares, courtyards) imported with a default 12 m height from an OSM snapshot
+ * where the polygon carried `building=yes` erroneously.
+ *
+ * Heuristic: footprint > 5 000 sqm AND height is exactly the default (12 m).
+ * Real Stockholm apartment blocks with that footprint always have an explicit
+ * height or levels tag; 12 m defaults on multi-thousand-sqm polygons are
+ * strongly indicative of misclassified open areas.
+ */
+function isLikelyOpenArea(building: Building): boolean {
+  const DEFAULT_HEIGHT = 12;
+  if (building.height !== DEFAULT_HEIGHT) return false;
+  return polygonAreaSqm(building.polygon) > 5_000;
 }
 
 // ── OSM Overpass API – fetch nearby buildings directly from browser ──
@@ -213,7 +380,7 @@ function distMeters(lat1: number, lng1: number, lat2: number, lng2: number): num
  *   other 5xx → same schedule
  * Throws on total failure so the caller can fall back gracefully.
  */
-async function overpassFetch(query: string): Promise<any> {
+async function overpassFetch(query: string): Promise<OverpassResponse> {
   const body = `data=${encodeURIComponent(query)}`;
   const headers = { "Content-Type": "application/x-www-form-urlencoded" };
   const maxAttempts = OVERPASS_ENDPOINTS.length * 2; // try each endpoint twice
@@ -262,15 +429,29 @@ export async function fetchBuildingsFromOSM(
         radius_m: radiusMeters,
       });
       if (!error && data && data.length > 0) {
-        return (data as any[]).map((row) => ({
+        const all = (data as Array<{ lat: number; lng: number; height: number; polygon: [number, number][] }>).map((row) => ({
           lat: row.lat as number,
           lng: row.lng as number,
           height: row.height as number,
           polygon: row.polygon as [number, number][],
         }));
+        // Filter out polygons that are almost certainly misclassified open areas
+        // (parks, squares) imported from an older OSM snapshot with building=yes.
+        // These have a very large footprint and no explicit height (default 12 m).
+        const filtered = all.filter((b) => !isLikelyOpenArea(b));
+        if (filtered.length < all.length) {
+          console.log(
+            `[buildings] Supabase: dropped ${all.length - filtered.length} likely-open-area polygon(s) ` +
+            `(>5000 sqm + default 12 m height) out of ${all.length} near (${lat.toFixed(4)}, ${lng.toFixed(4)})`
+          );
+        } else {
+          console.log(`[buildings] Supabase: ${all.length} buildings near (${lat.toFixed(4)}, ${lng.toFixed(4)})`);
+        }
+        return filtered;
       }
-    } catch {
-      // Fall through to Overpass if Supabase is unavailable
+      console.warn(`[buildings] Supabase returned no data (error: ${error?.message}), falling back to Overpass`);
+    } catch (e) {
+      console.warn("[buildings] Supabase error, falling back to Overpass:", e);
     }
   }
 
@@ -293,18 +474,32 @@ export async function fetchBuildingsFromOSM(
     if (dist + radiusMeters <= cRadius + 50) return entry.buildings;
   }
 
-  const query = `[out:json][timeout:14];(way["building"](around:${radiusMeters},${lat},${lng}););out body geom;`;
+  // Exclude elements that carry building=yes but are actually open areas:
+  //   - leisure=park/garden/pitch/playground (parks, sports fields)
+  //   - landuse=grass/park/recreation_ground/meadow (open green space)
+  //   - building=construction (not yet standing)
+  // Also apply the same large-footprint + default-height filter used for the
+  // Supabase path, in case an unusual OSM snapshot slips through the tag filter.
+  const query =
+    `[out:json][timeout:14];` +
+    `(way["building"]` +
+    `["building"!="construction"]` +
+    `["leisure"!~"park|garden|pitch|playground|recreation_ground"]` +
+    `["landuse"!~"grass|park|recreation_ground|meadow|greenfield"]` +
+    `(around:${radiusMeters},${lat},${lng}););out body geom;`;
   try {
     const data = await enqueueOverpass(() => overpassFetch(query));
     const buildings: Building[] = (data.elements || [])
-      .filter((el: any) => el.geometry && el.geometry.length > 0)
-      .map((el: any) => ({
-        lat: el.geometry[0].lat,
-        lng: el.geometry[0].lon,
+      .filter((el: OverpassElement) => el.geometry && el.geometry.length > 0)
+      .map((el: OverpassElement) => ({
+        lat: el.geometry![0].lat,
+        lng: el.geometry![0].lon,
         height: parseFloat(el.tags?.["building:height"] || el.tags?.["height"] || "12"),
-        polygon: el.geometry.map((g: any) => [g.lat, g.lon] as [number, number]),
-      }));
+        polygon: el.geometry!.map((g: OverpassNode) => [g.lat, g.lon] as [number, number]),
+      }))
+      .filter((b: Building) => !isLikelyOpenArea(b));
     osmCache.set(cacheKey, { buildings, timestamp: Date.now() });
+    console.log(`[buildings] Overpass: ${buildings.length} buildings near (${lat.toFixed(4)}, ${lng.toFixed(4)})`);
     return buildings;
   } catch {
     return [];
@@ -349,6 +544,13 @@ function closestPointOnSegment(
  * Falls back to the original venue coordinates when:
  *  - No buildings were fetched (Overpass unavailable)
  *  - The closest building edge is more than 30 m away (open area / park)
+ *
+ * Selection criterion (fixed): among all edges whose outward normal faces
+ * toward the venue (dot > 0) and that are within MAX_SNAP_M, pick the
+ * CLOSEST edge. The previous max-dot strategy let distant buildings with a
+ * perfectly-aligned facade (dot ≈ 1.0) beat adjacent buildings whose south
+ * wall had a slightly lower score (dot ≈ 0.9), placing the facade check
+ * point on the wrong side of the building.
  */
 export function getFacadePoint(
   venueLat: number,
@@ -362,10 +564,10 @@ export function getFacadePoint(
   const mPerDegLat = 111320;
   const mPerDegLng = 111320 * Math.cos((venueLat * Math.PI) / 180);
 
-  // Strategy: find the building edge whose outward normal (centroid → edge midpoint)
-  // most closely aligns with the centroid → venue direction. This identifies the
-  // facade that "faces" the entrance side regardless of where the geocode is placed.
-  let bestDot = -Infinity;
+  // Pick the closest edge (within MAX_SNAP_M) whose outward normal faces the
+  // venue — i.e. the edge with dot > 0 that is physically nearest to the
+  // geocoded address point.
+  let bestEdgeDist = Infinity;
   let bestLat = venueLat;
   let bestLng = venueLng;
   let anyNearby = false;
@@ -405,24 +607,25 @@ export function getFacadePoint(
       const normalLen = Math.sqrt(normalX * normalX + normalY * normalY);
       if (normalLen === 0) continue;
 
-      // Alignment score: 1.0 = normal points exactly at venue, -1.0 = opposite
+      // Only consider edges that face toward the venue (outward normal has a
+      // positive component in the centroid→venue direction). Edges facing away
+      // are the back wall and cannot be street-side terraces.
       const dot = (normalX / normalLen) * toVenueNX + (normalY / normalLen) * toVenueNY;
+      if (dot <= 0) continue;
 
-      if (dot > bestDot) {
-        // Only accept edges within snap distance of the venue
-        const [cLat, cLng] = closestPointOnSegment(
-          venueLat, venueLng, aLat, aLng, bLat, bLng, mPerDegLat, mPerDegLng
-        );
-        const dLatM = (cLat - venueLat) * mPerDegLat;
-        const dLngM = (cLng - venueLng) * mPerDegLng;
-        const edgeDistM = Math.sqrt(dLatM * dLatM + dLngM * dLngM);
+      // Compute distance from venue to this edge and accept if closest so far
+      const [cLat, cLng] = closestPointOnSegment(
+        venueLat, venueLng, aLat, aLng, bLat, bLng, mPerDegLat, mPerDegLng
+      );
+      const dLatM = (cLat - venueLat) * mPerDegLat;
+      const dLngM = (cLng - venueLng) * mPerDegLng;
+      const edgeDistM = Math.sqrt(dLatM * dLatM + dLngM * dLngM);
 
-        if (edgeDistM <= MAX_SNAP_M) {
-          anyNearby = true;
-          bestDot = dot;
-          bestLat = cLat + (normalY / normalLen) * FACADE_OFFSET_M / mPerDegLat;
-          bestLng = cLng + (normalX / normalLen) * FACADE_OFFSET_M / mPerDegLng;
-        }
+      if (edgeDistM <= MAX_SNAP_M && edgeDistM < bestEdgeDist) {
+        anyNearby = true;
+        bestEdgeDist = edgeDistM;
+        bestLat = cLat + (normalY / normalLen) * FACADE_OFFSET_M / mPerDegLat;
+        bestLng = cLng + (normalX / normalLen) * FACADE_OFFSET_M / mPerDegLng;
       }
     }
   }
@@ -461,7 +664,7 @@ function isVenueSunnyAt(
   date: Date
 ): boolean {
   const solar = getSolarPosition(date, lat, lng);
-  if (solar.altitude <= 5) return false;
+  if (solar.altitude <= 6) return false;
   if (getCloudCoverAt(forecast, date, fallbackCloudCover) >= 70) return false;
   return !buildings.some((b) =>
     isPointInBuildingShadow(lat, lng, b, solar.azimuth, solar.altitude)
@@ -526,7 +729,7 @@ export function calculateSunWindow(
 export function quickSunStatus(lat: number, lng: number, date: Date): SunStatus {
   const solar = getSolarPosition(date, lat, lng);
   return {
-    isSunny: solar.altitude > 5,
+    isSunny: solar.altitude > 6,
     buildingShadow: false,
     cloudCover: 0,
     solarAltitude: solar.altitude,
@@ -538,7 +741,8 @@ export function quickSunStatus(lat: number, lng: number, date: Date): SunStatus 
 export async function calculateSunStatus(
   venueLat: number,
   venueLng: number,
-  date: Date = new Date()
+  date: Date = new Date(),
+  extraPoints?: Array<{ lat: number; lng: number }>
 ): Promise<SunStatus> {
   const solar = getSolarPosition(date, venueLat, venueLng);
 
@@ -560,11 +764,13 @@ export async function calculateSunStatus(
 
   // Sun below horizon — no shadow check needed, but pass buildings so the
   // window calculation can account for them in future daytime steps.
-  if (solar.altitude <= 0) {
+  // Below 6° the sun is at rooftop level or lower — street-level terraces are
+  // in shade regardless of which specific building blocks the sun.
+  if (solar.altitude <= 6) {
     const sunWindow = calculateSunWindow(checkLat, checkLng, buildings, weather, date);
     return {
       isSunny: false,
-      buildingShadow: false,
+      buildingShadow: true,
       cloudCover,
       solarAltitude: solar.altitude,
       solarAzimuth: solar.azimuth,
@@ -574,16 +780,40 @@ export async function calculateSunStatus(
     };
   }
 
-  let buildingShadow = false;
+  // Helper: check if a coordinate is in shadow at the current solar position.
+  const checkShadow = (lat: number, lng: number): boolean =>
+    buildings.some((b) => isPointInBuildingShadow(lat, lng, b, solar.azimuth, solar.altitude));
 
-  for (const building of buildings) {
-    if (isPointInBuildingShadow(checkLat, checkLng, building, solar.azimuth, solar.altitude)) {
-      buildingShadow = true;
-      break;
-    }
+  let buildingShadow = checkShadow(checkLat, checkLng);
+  const mainSunny = !buildingShadow && cloudCover < 70;
+
+  // For corner venues with extra terrace points, check each side.
+  let isPartial: boolean | undefined;
+  if (extraPoints && extraPoints.length > 0) {
+    const extraSunny = extraPoints.map((p) => {
+      const fp = getFacadePoint(p.lat, p.lng, buildings);
+      return !checkShadow(fp.lat, fp.lng) && cloudCover < 70;
+    });
+    const anySunny = mainSunny || extraSunny.some(Boolean);
+    const anyShady = !mainSunny || extraSunny.some((s) => !s);
+    if (anySunny && anyShady) isPartial = true;
+    // If partial, treat overall as "sunny" so the venue surfaces in sunny lists.
+    const isSunny = anySunny;
+    const sunWindow = calculateSunWindow(checkLat, checkLng, buildings, weather, date);
+    return {
+      isSunny,
+      isPartial,
+      buildingShadow,
+      cloudCover,
+      solarAltitude: solar.altitude,
+      solarAzimuth: solar.azimuth,
+      confidence,
+      weather,
+      sunWindow,
+    };
   }
 
-  const isSunny = !buildingShadow && cloudCover < 70;
+  const isSunny = mainSunny;
   const sunWindow = calculateSunWindow(checkLat, checkLng, buildings, weather, date);
 
   return {

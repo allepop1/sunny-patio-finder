@@ -14,7 +14,30 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      places_cache: {
+        Row: {
+          address:    string
+          name:       string | null
+          venue_type: string | null
+          rating:     number | null
+          cached_at:  string
+        }
+        Insert: {
+          address:    string
+          name?:      string | null
+          venue_type?: string | null
+          rating?:    number | null
+          cached_at?: string
+        }
+        Update: {
+          address?:   string
+          name?:      string | null
+          venue_type?: string | null
+          rating?:    number | null
+          cached_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never

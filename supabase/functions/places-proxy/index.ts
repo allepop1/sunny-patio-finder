@@ -1,5 +1,16 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
+interface PlaceResult {
+  place_id?: string;
+  name?: string;
+  vicinity?: string;
+  formatted_address?: string;
+  types?: string[];
+  rating?: number;
+  geometry?: { location?: { lat?: number; lng?: number } };
+  [key: string]: unknown;
+}
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -10,7 +21,7 @@ const TYPES = ["restaurant", "bar", "cafe", "food"];
 const MAX_RESULTS = 60;
 const PAGE_DELAY_MS = 2000; // Google requires a pause before using next_page_token
 
-async function fetchPage(url: string): Promise<any> {
+async function fetchPage(url: string): Promise<{ results?: PlaceResult[]; next_page_token?: string }> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Google Places returned ${res.status}`);
   return res.json();
@@ -27,7 +38,7 @@ async function fetchType(
   radius: number,
   type: string,
   maxPages: number
-): Promise<any[]> {
+): Promise<PlaceResult[]> {
   const base = new URL(
     "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
   );
@@ -36,7 +47,7 @@ async function fetchType(
   base.searchParams.set("type", type);
   base.searchParams.set("key", apiKey);
 
-  const results: any[] = [];
+  const results: PlaceResult[] = [];
   let data = await fetchPage(base.toString());
   results.push(...(data.results ?? []));
 
@@ -85,7 +96,7 @@ serve(async (req) => {
 
     const searchRadius = radius ?? 1500;
 
-    let merged: any[];
+    let merged: PlaceResult[];
 
     if (query) {
       // Text Search — find venues by name/description near a location.
@@ -103,7 +114,7 @@ serve(async (req) => {
 
       // Normalise: text search returns formatted_address, nearby search returns vicinity.
       // Map formatted_address → vicinity so the client parser stays unchanged.
-      merged = merged.map((p: any) => ({
+      merged = merged.map((p: PlaceResult) => ({
         ...p,
         vicinity: p.vicinity ?? p.formatted_address ?? "",
       }));
